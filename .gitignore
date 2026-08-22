@@ -1,0 +1,16 @@
+# Build output. `target/` at the root covers the workspace; spike/target is a
+# leftover from before spike became a workspace member.
+/target/
+spike/target/
+
+# Screenshots and SVG dumps written by --shot and --svg, which land in the
+# working directory. Scoped to the root so docs/ can still carry images.
+/*.png
+/*.svg
+
+# Editor and OS noise.
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

@@ -1,0 +1,17 @@
+[package]
+name = "traveler-layout"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+traveler-scan = { path = "../traveler-scan" }
+# Matches the version bevy 0.19 pins, so the app links one copy.
+glam = "0.32"
+
+[lib]
+name = "traveler_layout"
+path = "src/lib.rs"
+
+[[bin]]
+name = "traveler-layout"
+path = "src/main.rs"

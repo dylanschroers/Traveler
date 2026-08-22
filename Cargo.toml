@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/traveler-scan", "crates/traveler-layout", "crates/traveler-edges", "crates/traveler-app", "spike"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[profile.release]
+opt-level = 3
+
+# Our code unoptimized, dependencies optimized. Keeps bevy usable in debug builds.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,12 @@
+# Normalize text files to LF in the repository and on checkout.
+#
+# Git for Windows ships with core.autocrlf=true in its *system* config, so a
+# Windows clone would otherwise land CRLF in the working tree while the index
+# stays LF. rustfmt writes LF, so without this every file it touches shows as
+# modified straight after a clone. Pinning eol=lf overrides the inherited
+# setting for this repo without asking each contributor to reconfigure git.
+* text=auto eol=lf
+
+# Already detected as binary by content; declared so nothing can mangle them.
+*.png binary
+*.ico binary

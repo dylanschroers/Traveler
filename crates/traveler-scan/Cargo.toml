@@ -1,0 +1,15 @@
+[package]
+name = "traveler-scan"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+rayon = "1"
+
+[lib]
+name = "traveler_scan"
+path = "src/lib.rs"
+
+[[bin]]
+name = "traveler-scan"
+path = "src/main.rs"

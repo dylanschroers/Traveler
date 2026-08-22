@@ -1,0 +1,17 @@
+[package]
+name = "traveler-edges"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+traveler-scan = { path = "../traveler-scan" }
+blake3 = "1"
+rayon = "1"
+
+[lib]
+name = "traveler_edges"
+path = "src/lib.rs"
+
+[[bin]]
+name = "traveler-edges"
+path = "src/main.rs"
