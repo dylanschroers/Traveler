@@ -798,7 +798,7 @@ rather than the implementation.
 | ~~**6c**~~ | `traveler-proc`: acquire + capture, Linux | **Done.** Launch and attach, all-threads stop, `maps` -> `AddressSpace` at region/mapping level. No pages. The fixture target and its tests landed here, and caught three things argument had not: the process-directed signal hang (§4), the anonymous region limit (§2), and that a dropped target has to be killed. |
 | ~~**6d**~~ | Ordered treemap + render | **Done.** Strip layout, the permission palette, the address space on screen, and the launcher's third choice. Aspect ratios measured, and the heuristic changed twice because of them (§8). |
 | ~~**6e**~~ | Pages | **Done.** pagemap under caps counted in pages (§7), bitsets, `Target` threaded through hover/pin/HUD and the extra branch on the detail pass (§9), pooled page blocks, soft-dirty opt-in, resident fraction on the thickness channel. Stop time measured, and the cost model rewritten because of it. |
-| **6f** | Windows backend | Written against the now-stable snapshot shape, **before anything is built on top of it**, so the abstraction is proven rather than assumed. |
+| ~~**6f**~~ | Windows backend | **Written and compile-checked, not run.** `VirtualQueryEx`, `QueryWorkingSetEx`, Toolhelp32 suspend, `GetMappedFileNameW` with the DOS-path conversion. Cross-checked with `cargo check --target x86_64-pc-windows-msvc`, which is what proves the abstraction; runtime correctness needs a Windows machine and is unverified. |
 | **6g** | `traveler-sym` tiers 1-2 | Sections and exported symbols. The single biggest legibility win in the plan. |
 | **6h** | Capture and diff | Multiple captures, boundary-split union frame, the diverging diff encoding and its validation (§10), a capture list in the HUD. Ends with the single-shot entry-point breakpoint from §4, which is what turns the linking diff on. |
 | **6i** | Poke | Untyped writes at a stop. |
@@ -812,13 +812,23 @@ written simultaneously. Writing Linux first and Windows immediately after the sh
 and before 6g/6h build on it — is what keeps the abstraction real instead of a Linux shape with
 Windows stuffed into it.
 
+**It did its job, and it cost the shape one field.** The snapshot needed a `group` on a mapping:
+the allocation the operating system says it came from, `AllocationBase` on Windows and 0 on Linux,
+which falls back to §2's adjacency rule. That is the shape of the whole design in one field — the
+platform that records something says it, the platform that does not degrades to an inference,
+and neither is flattened to the intersection. Had 6g and 6h been built first, that field would
+have arrived as a retrofit.
+
+**And it is unrun.** Cross-compiling proves it builds and that the types fit; nothing here has
+executed a Windows syscall. Everything in this file that says "measured" is Linux.
+
 ---
 
 ## 17. Risks and known asymmetries
 
 | risk | mitigation |
 | --- | --- |
-| Windows has no per-page write tracking | Capability flag. Degrade the view honestly; optional page-hash diff for one selected mapping only. |
+| Windows has no per-page write tracking | Capability flag, and 6f sets neither `SOFT_DIRTY` nor `WRITE_TRACKING`. Degrade the view honestly; optional page-hash diff for one selected mapping only. |
 | `ptrace_scope` blocks attach | Launch path needs no privileges and is the common case. Detect and explain, do not just fail. |
 | Per-thread ptrace produces torn snapshots | Seize every TID, loop until the task list is stable, and test it against a fixture that is actively writing. |
 | `clear_refs` slows the target | Opt-in per capture, with the cost stated in the UI. |

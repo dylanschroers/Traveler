@@ -5174,6 +5174,7 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "traveler-core",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

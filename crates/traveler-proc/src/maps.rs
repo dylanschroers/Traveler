@@ -68,6 +68,7 @@ fn parse_line(line: &str) -> Option<MappingFacts<'_>> {
         offset: offset.unwrap_or(0),
         dev: dev.unwrap_or(0),
         inode: inode.unwrap_or(0),
+        group: 0,
     })
 }
 

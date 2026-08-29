@@ -4,7 +4,7 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use traveler_layout::{
-    CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements, SpaceLayout, SpaceParams,
+    CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements,
     svg::{self, SvgParams},
 };
 use traveler_scan::{ExtId, ScanOptions, Tree, scan};
@@ -198,8 +198,11 @@ fn main() -> ExitCode {
         .child_ids(root)
         .filter(|c| placements.is_visible(*c))
         .collect();
-    println!("
-  {} top-level districts:", districts.len());
+    println!(
+        "
+  {} top-level districts:",
+        districts.len()
+    );
     for d in districts.iter().take(12) {
         let (x0, z0, x1, z1) = placements.footprint(*d);
         println!(
@@ -240,7 +243,9 @@ fn main() -> ExitCode {
     }
 
     if let Some(out) = svg_out {
-        let doc = svg::render(&index, &placements, &svg_params, |id| ext_color(index.ext(id)));
+        let doc = svg::render(&index, &placements, &svg_params, |id| {
+            ext_color(index.ext(id))
+        });
         if let Err(e) = std::fs::write(&out, doc.as_bytes()) {
             eprintln!("error: cannot write {}: {e}", out.display());
             return ExitCode::FAILURE;
@@ -266,6 +271,7 @@ fn process(
     svg_out: Option<PathBuf>,
     svg_params: &SvgParams,
 ) -> ExitCode {
+    use traveler_layout::{SpaceLayout, SpaceParams};
     use traveler_proc::{AttachedTarget, Launch};
 
     let mut launch = Launch::new(&argv[0]);
@@ -296,7 +302,8 @@ fn process(
     let frame = space.frame();
     let mut placements = Placements::with_capacity(frame.len());
     let started = std::time::Instant::now();
-    SpaceLayout::new(SpaceParams::default()).place(&LayoutCtx::new(frame.as_ref()), &mut placements);
+    SpaceLayout::new(SpaceParams::default())
+        .place(&LayoutCtx::new(frame.as_ref()), &mut placements);
     let elapsed = started.elapsed();
 
     println!("\n{} [{}]", target.name(), target.pid());

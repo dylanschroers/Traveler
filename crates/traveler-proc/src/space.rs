@@ -97,6 +97,10 @@ pub struct MappingFacts<'a> {
     pub offset: u64,
     pub dev: u64,
     pub inode: u64,
+    /// The allocation this mapping came from, when the operating system records one, and 0 when
+    /// it does not. Windows has `AllocationBase`; Linux has nothing, and falls back to the rule
+    /// in §2 — adjacency plus a shared backing.
+    pub group: u64,
 }
 
 impl MappingFacts<'_> {
@@ -110,6 +114,9 @@ impl MappingFacts<'_> {
     /// because they share a file, a thread stack fuses with its guard because both are unnamed.
     #[inline]
     fn same_backing(&self, other: &Self) -> bool {
+        if self.group != 0 || other.group != 0 {
+            return self.group == other.group;
+        }
         self.dev == other.dev && self.inode == other.inode && self.path == other.path
     }
 }

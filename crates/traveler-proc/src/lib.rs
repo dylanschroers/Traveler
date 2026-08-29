@@ -10,12 +10,16 @@ mod space;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "windows")]
+mod windows;
 
 pub use pages::{PageBits, PageLimits};
 pub use space::{Backing, Frame, MappingFacts, NodeKind, Prot};
 
 #[cfg(target_os = "linux")]
 pub use linux::{AttachedTarget, CaptureOptions, Launch};
+#[cfg(target_os = "windows")]
+pub use windows::{AttachedTarget, CaptureOptions, Launch};
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
