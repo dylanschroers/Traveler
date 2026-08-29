@@ -19,6 +19,7 @@ use crate::hud::{INK_MUTED, INK_SECONDARY, PANEL, font, panel};
 use crate::lod::{Hover, Lod};
 use crate::palette::Category;
 use crate::pin::{MAX_PAINTED, Pinned};
+use crate::poke::Poke;
 use crate::scene::{SceneView, Target, subtree_tops};
 use crate::symbols::{Symbols, Tier};
 use crate::{BlockMaterials, FileNode, Mode, block_materials, camera_start};
@@ -252,6 +253,7 @@ pub fn spawn(
         block.by_slot[Category::Other as usize].clone(),
     );
     commands.insert_resource(pages);
+    commands.init_resource::<Poke>();
 
     stage(&mut commands, &mut space, &cube, &block);
     commands.insert_resource(BlockMesh(cube));
@@ -529,7 +531,7 @@ pub fn setup_hud(
             "WASD move   space/ctrl up-down   shift run   scroll speed   right-click or M grab mouse\n\
              L level of detail   [ ] detail threshold   H height channel   R reset camera\n\
              C new capture   , . step captures   X diff the last two\n\
-             left click pins   fly close to a mapping to see its pages",
+             left click pins   P writes bytes at the pin   fly close to see pages",
         ),
         font(12.0),
         TextColor(INK_MUTED),
@@ -541,6 +543,7 @@ pub fn update_hover(
     space: Res<Space>,
     hover: Res<Hover>,
     pinned: Res<Pinned>,
+    poke: Res<Poke>,
     mut symbols: ResMut<Symbols>,
     mut readout: Query<(&mut Text, &mut Visibility), With<SpaceHover>>,
 ) {
@@ -596,6 +599,14 @@ pub fn update_hover(
                 }
             ));
         }
+    }
+    if poke.open {
+        out.push_str(&format!(
+            "\nwrite: {}_   (u8 u16 u32 u64 i8..i64 f32 f64 utf8 bytes; enter or esc)",
+            poke.text
+        ));
+    } else if let Some(result) = &poke.result {
+        out.push_str(&format!("\n{result}"));
     }
     text.0 = out;
 }
@@ -760,6 +771,7 @@ pub fn close(mut commands: Commands) {
     commands.remove_resource::<Space>();
     commands.remove_resource::<Symbols>();
     commands.remove_resource::<PageView>();
+    commands.remove_resource::<Poke>();
     commands.remove_resource::<Captures>();
     commands.remove_resource::<Traced>();
     commands.remove_resource::<Lod>();

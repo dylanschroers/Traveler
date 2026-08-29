@@ -296,6 +296,63 @@ impl AttachedTarget {
         Ok(read)
     }
 
+    /// Writes bytes into the target at a stop, lifting the page protection if it has to and
+    /// putting it back afterwards. `WriteProcessMemory` will not write a read-only page on its
+    /// own, which is the same obstacle `/proc/pid/mem` solves with `FOLL_FORCE` on the other side.
+    pub fn write_mem(&mut self, addr: u64, bytes: &[u8]) -> Result<usize> {
+        use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+        use windows_sys::Win32::System::Memory::{PAGE_READWRITE, VirtualProtectEx};
+
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let was_running = !self.stopped;
+        self.freeze()?;
+
+        let mut previous = 0u32;
+        let lifted = unsafe {
+            VirtualProtectEx(
+                self.process,
+                addr as *mut _,
+                bytes.len(),
+                PAGE_READWRITE,
+                &mut previous,
+            ) != 0
+        };
+
+        let mut written = 0usize;
+        let ok = unsafe {
+            WriteProcessMemory(
+                self.process,
+                addr as *mut _,
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                &mut written,
+            )
+        };
+        let failed = (ok == 0 && written == 0).then(io::Error::last_os_error);
+
+        if lifted {
+            let mut restored = 0u32;
+            unsafe {
+                VirtualProtectEx(
+                    self.process,
+                    addr as *mut _,
+                    bytes.len(),
+                    previous,
+                    &mut restored,
+                )
+            };
+        }
+        if was_running {
+            self.thaw()?;
+        }
+        match failed {
+            Some(e) => Err(Error::Io(e)),
+            None => Ok(written),
+        }
+    }
+
     /// Suspend every thread from a Toolhelp32 snapshot. The same requirement as Linux with
     /// different plumbing: a snapshot taken while other threads run is a torn one.
     fn freeze(&mut self) -> Result<()> {

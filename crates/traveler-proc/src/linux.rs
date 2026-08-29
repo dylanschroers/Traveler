@@ -84,6 +84,9 @@ pub struct AttachedTarget {
     scratch: String,
     /// Kept across captures so a repeated capture does not re-open it inside the stop.
     pagemap: Option<File>,
+    /// Opened only when something is actually written, since a poke is rare and the handle is
+    /// what allows writing at all.
+    mem: Option<File>,
     words: Vec<u64>,
     stdout: Option<ChildStdout>,
 }
@@ -161,6 +164,7 @@ impl AttachedTarget {
             acquired: Instant::now(),
             scratch: String::with_capacity(1 << 16),
             pagemap: None,
+            mem: None,
             words: Vec::new(),
             stdout,
         }
@@ -312,6 +316,61 @@ impl AttachedTarget {
             return Err(Error::Io(io::Error::last_os_error()));
         }
         Ok(n as usize)
+    }
+
+    /// Writes bytes into the target at a stop.
+    ///
+    /// Deliberately `/proc/pid/mem` rather than `process_vm_writev`, which cannot write a
+    /// read-only page. This goes through `FOLL_FORCE` and can, which is how gdb patches `.text`.
+    ///
+    /// The stop is what makes it safe: no race with the target's threads, no torn write, and
+    /// nothing to reason about regarding memory ordering against a running program. As with a
+    /// capture, whether the target runs afterwards is exactly whether it ran before.
+    pub fn write_mem(&mut self, addr: u64, bytes: &[u8]) -> Result<usize> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
+        let was_running = !self.stopped;
+        self.freeze()?;
+
+        let written = self.write_at(addr, bytes);
+        self.release_helpers();
+        if was_running {
+            self.thaw()?;
+        }
+        written
+    }
+
+    fn write_at(&mut self, addr: u64, bytes: &[u8]) -> Result<usize> {
+        if self.mem.is_none() {
+            self.mem = Some(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(format!("/proc/{}/mem", self.pid))?,
+            );
+        }
+        let fd = self.mem.as_ref().expect("just opened").as_raw_fd();
+        let mut done = 0usize;
+        while done < bytes.len() {
+            let n = unsafe {
+                libc::pwrite(
+                    fd,
+                    bytes[done..].as_ptr().cast(),
+                    bytes.len() - done,
+                    (addr + done as u64) as libc::off_t,
+                )
+            };
+            if n <= 0 {
+                let e = io::Error::last_os_error();
+                return if done > 0 {
+                    Ok(done)
+                } else {
+                    Err(Error::Io(e))
+                };
+            }
+            done += n as usize;
+        }
+        Ok(done)
     }
 
     /// Ptrace is per-thread: seizing the leader stops one thread while the others keep mutating

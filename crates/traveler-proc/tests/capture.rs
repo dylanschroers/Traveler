@@ -432,3 +432,55 @@ fn a_huge_reservation_is_elided_and_the_stop_stays_bounded() {
         space.meta().stop
     );
 }
+
+/// §12: a poke happens at a stop, so there is no race with the target's threads and no torn
+/// write. The fixture writes a known marker, so a read-back proves the write rather than assuming
+/// the call succeeded.
+#[test]
+fn a_poke_lands_where_it_was_aimed() {
+    let mut fx = Fixture::start(0);
+    let (window, _) = fx.mark("window");
+    let (marker, _) = fx.mark("marker");
+
+    let mut before = [0u8; 8];
+    fx.target.read_mem(window, &mut before).expect("read");
+    assert_eq!(u64::from_ne_bytes(before), marker);
+
+    let poked: u64 = 0x0123_4567_89ab_cdef;
+    let n = fx
+        .target
+        .write_mem(window, &poked.to_ne_bytes())
+        .expect("write");
+    assert_eq!(n, 8);
+
+    let mut after = [0u8; 8];
+    fx.target.read_mem(window, &mut after).expect("read");
+    assert_eq!(u64::from_ne_bytes(after), poked);
+    // The target is still running, because a poke observes the same policy a capture does.
+    assert!(!fx.target.is_stopped());
+    assert!(fx.target.is_alive());
+}
+
+/// The reason it is `/proc/pid/mem` and not `process_vm_writev`: a read-only page. The fixture's
+/// code mapping is `r-x`, and writing it is how a debugger patches `.text`.
+#[test]
+fn a_poke_can_write_a_page_that_is_not_writable() {
+    let mut fx = Fixture::start(0);
+    let (code, _) = fx.mark("code");
+
+    let poked: u64 = 0xdead_beef_feed_face;
+    fx.target
+        .write_mem(code, &poked.to_ne_bytes())
+        .expect("write to a read-only mapping");
+
+    let mut back = [0u8; 8];
+    fx.target.read_mem(code, &mut back).expect("read");
+    assert_eq!(u64::from_ne_bytes(back), poked);
+}
+
+#[test]
+fn a_poke_into_nothing_fails_rather_than_pretending() {
+    let mut fx = Fixture::start(0);
+    assert!(fx.target.write_mem(0x10, &[1, 2, 3, 4]).is_err());
+    assert_eq!(fx.target.write_mem(fx.mark("window").0, &[]).ok(), Some(0));
+}

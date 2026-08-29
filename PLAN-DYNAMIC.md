@@ -823,7 +823,7 @@ rather than the implementation.
 | ~~**6f**~~ | Windows backend | **Written and compile-checked, not run.** `VirtualQueryEx`, `QueryWorkingSetEx`, Toolhelp32 suspend, `GetMappedFileNameW` with the DOS-path conversion. Cross-checked with `cargo check --target x86_64-pc-windows-msvc`, which is what proves the abstraction; runtime correctness needs a Windows machine and is unverified. |
 | ~~**6g**~~ | `traveler-sym` tiers 1-2 | **Done.** Sections as a third level with gaps filling what they do not cover, `.dynsym` names on the crosshair, images parsed once and keyed by path and mtime, the tier stated in the HUD. `gdb` goes from 361 nodes to 892. |
 | ~~**6h**~~ | Capture and diff | **Done, less the breakpoint.** Multiple captures on a key, boundary-split union frame, the diverging encoding measured against the same floors as the categorical hues (§10), the view named in the HUD. The single-shot entry-point breakpoint from §4 is **not** built: without it capture 0 is where the user pressed the key rather than the `execve` stop, so the linking diff is available from `--run` only by taking a capture immediately. |
-| **6i** | Poke | Untyped writes at a stop. |
+| ~~**6i**~~ | Poke | **Done.** Untyped writes at a stop, on both backends. `P` on a pinned node or page, with the width said out loud and a value too wide for its type refused rather than truncated. |
 | **7** | Pointer graph | Worker thread, aggregated mapping-to-mapping edges, drill-down within a selection. |
 | **8** | Tier 3 symbols | DWARF and PDB. Types, locals, line numbers. Typed pokes. |
 | **9** | Full debugger control | Breakpoints, stepping, watchpoints, unwinding, behind the existing `AttachedTarget` seam. |

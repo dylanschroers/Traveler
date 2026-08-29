@@ -11,6 +11,7 @@ mod loading;
 mod lod;
 mod palette;
 mod pin;
+mod poke;
 mod satellite;
 mod scene;
 mod space;
@@ -389,6 +390,7 @@ fn main() {
             space::update_stats,
             space::update_hover,
             space::height_input,
+            poke::input,
             reset_camera_on_key::<Space>,
             (pin::pin_input, pin::update_pin::<Space>, space::paint_pin).chain(),
         )
