@@ -20,7 +20,7 @@ use std::process::{ChildStdout, Command, Stdio};
 use std::time::{Instant, SystemTime};
 
 use crate::pages::{PageBits, PageLimits, RawPages};
-use crate::{AddressSpace, Caps, CaptureMeta, Error, Result, maps};
+use crate::{AddressSpace, Caps, CaptureMeta, Error, Result, SectionSource, maps};
 
 /// What one capture is allowed to cost the target.
 #[derive(Clone, Copy, Debug, Default)]
@@ -193,9 +193,21 @@ impl AttachedTarget {
         self.capture_with(&CaptureOptions::default())
     }
 
+    pub fn capture_with(&mut self, options: &CaptureOptions) -> Result<AddressSpace> {
+        self.capture_sections(options, &mut |_| Vec::new())
+    }
+
     /// Reads the address space. Whether the target is running afterwards is exactly whether it
     /// was running before: a capture observes, it does not decide.
-    pub fn capture_with(&mut self, options: &CaptureOptions) -> Result<AddressSpace> {
+    ///
+    /// `sections` runs after the target is resumed, on mappings this already owns. It is a
+    /// callback rather than a dependency because `proc` asks the operating system and `sym` reads
+    /// files, and neither should have to know about the other.
+    pub fn capture_sections(
+        &mut self,
+        options: &CaptureOptions,
+        sections: SectionSource<'_>,
+    ) -> Result<AddressSpace> {
         let was_running = !self.stopped;
         let started = Instant::now();
 
@@ -231,9 +243,11 @@ impl AttachedTarget {
         }
 
         let mappings = maps::parse(&text);
+        let sections = sections(&mappings);
         let space = AddressSpace::single(
             &format!("{} [{}]", self.name, self.pid),
             &mappings,
+            &sections,
             pages,
             Caps(caps),
             CaptureMeta {

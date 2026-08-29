@@ -1,0 +1,17 @@
+[package]
+name = "traveler-sym"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+object = { version = "0.37", default-features = false, features = ["read", "std", "elf", "pe"] }
+
+[lib]
+name = "traveler_sym"
+path = "src/lib.rs"
+
+# An image with a known shape for the tests to parse. Kept in this crate so it is always built
+# alongside them and never goes stale.
+[[bin]]
+name = "sym-fixture"
+path = "src/bin/sym-fixture.rs"

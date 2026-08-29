@@ -4,6 +4,7 @@ members = [
     "crates/traveler-core",
     "crates/traveler-scan",
     "crates/traveler-proc",
+    "crates/traveler-sym",
     "crates/traveler-layout",
     "crates/traveler-edges",
     "crates/traveler-app",

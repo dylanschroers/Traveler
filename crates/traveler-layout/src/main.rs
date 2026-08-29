@@ -291,7 +291,10 @@ fn process(
         return ExitCode::FAILURE;
     }
     std::thread::sleep(std::time::Duration::from_millis(wait_ms));
-    let space = match target.capture() {
+    let mut images = traveler_sym::Images::default();
+    let space = match target.capture_sections(&traveler_proc::CaptureOptions::default(), &mut |m| {
+        sections(&mut images, m)
+    }) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -348,6 +351,54 @@ fn process(
 fn process(_: &[String], _: u64, _: bool, _: Option<PathBuf>, _: &SvgParams) -> ExitCode {
     eprintln!("error: capturing a process is Linux-only so far");
     ExitCode::FAILURE
+}
+
+/// Tier 2 sections, so the dump shows what the app shows. Duplicated from the app on purpose:
+/// this tool exists to measure the layout, and a copy here keeps it independent of bevy.
+#[cfg(target_os = "linux")]
+fn sections(
+    images: &mut traveler_sym::Images,
+    mappings: &[traveler_proc::MappingFacts<'_>],
+) -> Vec<Vec<traveler_proc::SubExtent>> {
+    use std::collections::HashMap;
+    use traveler_proc::{Prot, SubExtent};
+
+    let mut start: HashMap<&str, u64> = HashMap::new();
+    for m in mappings {
+        if m.path.is_empty() || m.path.starts_with('[') {
+            continue;
+        }
+        let at = m.addr.saturating_sub(m.offset);
+        start.entry(m.path).and_modify(|e| *e = (*e).min(at)).or_insert(at);
+    }
+
+    mappings
+        .iter()
+        .map(|m| {
+            let Some(at) = start.get(m.path) else {
+                return Vec::new();
+            };
+            let Some(image) = images.get(std::path::Path::new(m.path)) else {
+                return Vec::new();
+            };
+            let bias = at.saturating_sub(image.base_vaddr);
+            let end = m.addr + m.len;
+            image
+                .sections()
+                .iter()
+                .filter(|s| s.size >= 4096)
+                .filter_map(|s| {
+                    let addr = bias + s.addr;
+                    (addr < end && addr + s.size > m.addr).then(|| SubExtent {
+                        addr,
+                        len: s.size,
+                        label: image.section_name(s).to_string(),
+                        prot: Prot(Prot::READ),
+                    })
+                })
+                .collect()
+        })
+        .collect()
 }
 
 /// The validated three hues from PLAN.md §5, mapped onto permissions.

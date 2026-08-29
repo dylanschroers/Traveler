@@ -14,6 +14,7 @@ mod pin;
 mod satellite;
 mod scene;
 mod space;
+mod symbols;
 
 use std::path::PathBuf;
 use std::sync::Arc;

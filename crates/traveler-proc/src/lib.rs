@@ -14,7 +14,12 @@ mod linux;
 mod windows;
 
 pub use pages::{PageBits, PageLimits};
-pub use space::{Backing, Frame, MappingFacts, NodeKind, Prot};
+pub use space::{Backing, Frame, MappingFacts, NodeKind, Prot, SubExtent, fill_sections};
+
+/// Turns a capture's mappings into the sub-extents inside them, one list per mapping. A callback
+/// rather than a trait or a dependency: `traveler-sym` reads files and this crate reads the
+/// operating system, and the process view has to work with the symbol side absent or failing.
+pub type SectionSource<'a> = &'a mut dyn FnMut(&[MappingFacts<'_>]) -> Vec<Vec<SubExtent>>;
 
 #[cfg(target_os = "linux")]
 pub use linux::{AttachedTarget, CaptureOptions, Launch};
@@ -79,23 +84,42 @@ impl AddressSpace {
     pub fn single(
         root_label: &str,
         mappings: &[MappingFacts<'_>],
+        sections: &[Vec<SubExtent>],
         pages: PageBits,
         caps: Caps,
         meta: CaptureMeta,
     ) -> Self {
-        let frame = Frame::build(root_label, mappings);
+        let empty: Vec<SubExtent> = Vec::new();
+        let filled: Vec<Vec<SubExtent>> = mappings
+            .iter()
+            .enumerate()
+            .map(|(i, m)| fill_sections(m, sections.get(i).unwrap_or(&empty)))
+            .collect();
+        let frame = Frame::build(root_label, mappings, &filled);
         let n = frame.len();
 
+        let mut prot = vec![Prot::default(); n];
+        let first = frame.mappings().start as usize;
+        for (i, m) in mappings.iter().enumerate() {
+            let id = NodeId((first + i) as u32);
+            prot[id.index()] = m.prot;
+            // A section carries what it holds, so `.text` reads as code and `.rodata` as
+            // constants inside one `r-xp` library. It does not roll back up into the mapping,
+            // whose permissions are the operating system's answer and not an inference.
+            for (child, sub) in frame.child_ids(id).zip(&filled[i]) {
+                prot[child.index()] = sub.prot;
+            }
+        }
         // A container's permissions are the union of what it holds, so a region reads as
         // executable when any of it is, rather than as nothing at all.
-        let mut prot = vec![Prot::default(); n];
-        for (i, m) in mappings.iter().enumerate() {
-            prot[frame.mappings().start as usize + i] = m.prot;
-        }
-        for id in (1..n).rev() {
-            let bits = prot[id].0;
-            let parent = frame.parent(NodeId(id as u32)).index();
+        for id in frame.mappings() {
+            let bits = prot[id as usize].0;
+            let parent = frame.parent(NodeId(id)).index();
             prot[parent].0 |= bits;
+        }
+        for id in frame.children(frame.root()) {
+            let bits = prot[id as usize].0;
+            prot[0].0 |= bits;
         }
 
         let mut resident = vec![0u64; n];

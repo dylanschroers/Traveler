@@ -38,7 +38,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::pages::{PAGE, PageBits, PageLimits, RawPages};
-use crate::{AddressSpace, Caps, CaptureMeta, Error, MappingFacts, Prot, Result};
+use crate::{AddressSpace, Caps, CaptureMeta, Error, MappingFacts, Prot, Result, SectionSource};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CaptureOptions {
@@ -196,8 +196,16 @@ impl AttachedTarget {
         self.capture_with(&CaptureOptions::default())
     }
 
-    /// Same policy as Linux: a capture observes, it does not decide whether the target runs.
     pub fn capture_with(&mut self, options: &CaptureOptions) -> Result<AddressSpace> {
+        self.capture_sections(options, &mut |_| Vec::new())
+    }
+
+    /// Same policy as Linux: a capture observes, it does not decide whether the target runs.
+    pub fn capture_sections(
+        &mut self,
+        options: &CaptureOptions,
+        sections: SectionSource<'_>,
+    ) -> Result<AddressSpace> {
         let was_running = !self.stopped;
         let started = Instant::now();
 
@@ -243,9 +251,11 @@ impl AttachedTarget {
             caps |= Caps::PAGE_RESIDENCY;
         }
 
+        let sections = sections(&mappings);
         Ok(AddressSpace::single(
             &format!("{} [{}]", self.name, self.pid),
             &mappings,
+            &sections,
             PageBits::decode(&raw),
             Caps(caps),
             CaptureMeta {

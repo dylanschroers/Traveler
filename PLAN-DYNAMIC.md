@@ -508,6 +508,15 @@ Measured with `--no-aslr` so the runs are comparable, at the mapping level:
 | `gdb`, 52 libraries | 284 | 2.02 | 7.9 | 48.3 | 322.9 | 0.70% |
 | `python3`, 1 GiB `bytearray` | 44 | 2.73 | 34.9 | 97.3 | 97.3 | 6.8% |
 | `node` | 103 | 3.54 | 52.3 | 2630 | 3713 | 11.7% |
+| `gdb` again, with 6g's sections | 650 | 2.22 | 21.1 | 321.8 | 1321 | 5.1% |
+
+The last row is the same target one level deeper, and it is the honest cost of tier 2: the leaves
+are sections now, and within one mapping a `.text` and a `.plt` differ by three orders of
+magnitude. Emitting *every* section gives median 4.50 and 8.7% hairlines; a **one-page floor**,
+below which a section falls into the gap around it rather than getting its own tile, gives the
+2.22 above while still keeping two and a half times as many nodes as the mapping level alone. A
+page is the granularity of the whole view, so a section smaller than one could never have a tile
+worth looking at.
 
 **The remaining spread is the data, not the heuristic, and that is worth being precise about.**
 The city reaches median 1.03 because a folder holds hundreds of files of similar size, which gives
@@ -799,7 +808,7 @@ rather than the implementation.
 | ~~**6d**~~ | Ordered treemap + render | **Done.** Strip layout, the permission palette, the address space on screen, and the launcher's third choice. Aspect ratios measured, and the heuristic changed twice because of them (§8). |
 | ~~**6e**~~ | Pages | **Done.** pagemap under caps counted in pages (§7), bitsets, `Target` threaded through hover/pin/HUD and the extra branch on the detail pass (§9), pooled page blocks, soft-dirty opt-in, resident fraction on the thickness channel. Stop time measured, and the cost model rewritten because of it. |
 | ~~**6f**~~ | Windows backend | **Written and compile-checked, not run.** `VirtualQueryEx`, `QueryWorkingSetEx`, Toolhelp32 suspend, `GetMappedFileNameW` with the DOS-path conversion. Cross-checked with `cargo check --target x86_64-pc-windows-msvc`, which is what proves the abstraction; runtime correctness needs a Windows machine and is unverified. |
-| **6g** | `traveler-sym` tiers 1-2 | Sections and exported symbols. The single biggest legibility win in the plan. |
+| ~~**6g**~~ | `traveler-sym` tiers 1-2 | **Done.** Sections as a third level with gaps filling what they do not cover, `.dynsym` names on the crosshair, images parsed once and keyed by path and mtime, the tier stated in the HUD. `gdb` goes from 361 nodes to 892. |
 | **6h** | Capture and diff | Multiple captures, boundary-split union frame, the diverging diff encoding and its validation (§10), a capture list in the HUD. Ends with the single-shot entry-point breakpoint from §4, which is what turns the linking diff on. |
 | **6i** | Poke | Untyped writes at a stop. |
 | **7** | Pointer graph | Worker thread, aggregated mapping-to-mapping edges, drill-down within a selection. |

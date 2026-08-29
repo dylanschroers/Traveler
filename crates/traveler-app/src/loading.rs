@@ -148,7 +148,7 @@ pub fn poll(
 
     let outcome = match &loading.job {
         Job::Scan(slot) => match slot.lock().ok().and_then(|mut g| g.take()) {
-            Some(result) => result.map(Opened::Disk),
+            Some(result) => result.map(|index| Opened::Disk(Box::new(index))),
             None => return,
         },
         Job::Acquire { request, ready_at } => {
@@ -162,11 +162,11 @@ pub fn poll(
 
     match outcome {
         Ok(Opened::Disk(index)) => {
-            open_disk(&mut commands, &session, index);
+            open_disk(&mut commands, &session, *index);
             next.set(Mode::Disk);
         }
-        Ok(Opened::Process(target, space)) => {
-            open_process(&mut commands, &session, target, space);
+        Ok(Opened::Process(session_data)) => {
+            open_process(&mut commands, &session, *session_data);
             next.set(Mode::Process);
         }
         Err(message) => {
@@ -177,15 +177,25 @@ pub fn poll(
     }
 }
 
+/// Boxed because the process variant is much larger than the disk one, and this is moved through
+/// a `Result` on every poll.
 enum Opened {
-    Disk(FileIndex),
+    Disk(Box<FileIndex>),
     #[cfg(target_os = "linux")]
-    Process(traveler_proc::AttachedTarget, traveler_proc::AddressSpace),
+    Process(Box<ProcessSession>),
+}
+
+#[cfg(target_os = "linux")]
+struct ProcessSession {
+    target: traveler_proc::AttachedTarget,
+    capture: traveler_proc::AddressSpace,
+    symbols: crate::symbols::Symbols,
 }
 
 #[cfg(target_os = "linux")]
 fn acquire(request: &Request) -> Result<Opened, String> {
-    use traveler_proc::{AttachedTarget, Launch};
+    use crate::symbols::Symbols;
+    use traveler_proc::{AttachedTarget, CaptureOptions, Launch};
 
     let mut target = match request {
         Request::Launch {
@@ -207,8 +217,19 @@ fn acquire(request: &Request) -> Result<Opened, String> {
         Request::Attach(pid) => AttachedTarget::attach(*pid).map_err(|e| e.to_string())?,
         Request::Disk(_) => unreachable!("a disk request is a scan"),
     };
-    let space = target.capture().map_err(|e| e.to_string())?;
-    Ok(Opened::Process(target, space))
+    // Tier 2 rides along with the capture: the images are parsed after the target is resumed,
+    // and if none of them parse the view is tier 1 and still complete.
+    let mut symbols = Symbols::default();
+    let space = target
+        .capture_sections(&CaptureOptions::default(), &mut |mappings| {
+            symbols.build(mappings)
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(Opened::Process(Box::new(ProcessSession {
+        target,
+        capture: space,
+        symbols,
+    })))
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -217,13 +238,14 @@ fn acquire(_: &Request) -> Result<Opened, String> {
 }
 
 #[cfg(target_os = "linux")]
-fn open_process(
-    commands: &mut Commands,
-    session: &Session,
-    target: traveler_proc::AttachedTarget,
-    capture: traveler_proc::AddressSpace,
-) {
+fn open_process(commands: &mut Commands, session: &Session, opened: ProcessSession) {
     use crate::space::{Space, Traced};
+
+    let ProcessSession {
+        target,
+        capture,
+        symbols,
+    } = opened;
 
     let meta = capture.meta();
     println!(
@@ -245,8 +267,16 @@ fn open_process(
     lod.enabled = session.lod;
     lod.px_threshold = session.lod_px;
 
+    println!(
+        "  tier {:?}: {} sections from {} images",
+        symbols.tier(),
+        symbols.sections(),
+        symbols.images()
+    );
+
     commands.insert_resource(space);
     commands.insert_resource(Traced(target));
+    commands.insert_resource(symbols);
     commands.insert_resource(lod);
     commands.insert_resource(Hover::default());
     commands.insert_resource(Pinned::default());

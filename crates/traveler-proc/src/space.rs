@@ -105,7 +105,7 @@ pub struct MappingFacts<'a> {
 
 impl MappingFacts<'_> {
     #[inline]
-    fn end(&self) -> u64 {
+    pub fn end(&self) -> u64 {
         self.addr + self.len
     }
 
@@ -119,6 +119,19 @@ impl MappingFacts<'_> {
         }
         self.dev == other.dev && self.inode == other.inode && self.path == other.path
     }
+}
+
+/// A named piece of a mapping: a section, when the on-disk image was parsed. Owned rather than
+/// borrowed because the labels come from an image cache the frame does not outlive-borrow, and a
+/// process has hundreds of sections rather than millions.
+#[derive(Clone, Debug)]
+pub struct SubExtent {
+    pub addr: u64,
+    pub len: u64,
+    pub label: String,
+    /// A section carries the permissions of what it holds rather than of its mapping, so `.text`
+    /// reads as code and `.rodata` as constants inside one `r-xp` library.
+    pub prot: Prot,
 }
 
 /// The ordered set of extents ids are assigned over, and what a layout is a pure function of.
@@ -215,11 +228,20 @@ impl Frame {
         &self.text[r.off as usize..(r.off + r.len) as usize]
     }
 
-    /// `mappings` must be sorted by address and must not overlap.
-    pub fn build(root_label: &str, mappings: &[MappingFacts<'_>]) -> Frame {
+    /// `mappings` must be sorted by address and must not overlap. `children` is parallel to it
+    /// and already filled by [`fill_sections`], so the caller knows which node id each sub-extent
+    /// will get and can colour it.
+    pub fn build(
+        root_label: &str,
+        mappings: &[MappingFacts<'_>],
+        children: &[Vec<SubExtent>],
+    ) -> Frame {
         let regions = region_bounds(mappings);
-        let n = 1 + regions.len() + mappings.len();
         let first_mapping = 1 + regions.len() as u32;
+        let empty: Vec<SubExtent> = Vec::new();
+        let children = |i: usize| children.get(i).unwrap_or(&empty);
+        let leaves: usize = (0..mappings.len()).map(|i| children(i).len()).sum();
+        let n = 1 + regions.len() + mappings.len() + leaves;
 
         let mut f = Frame {
             parent: Vec::with_capacity(n),
@@ -232,7 +254,7 @@ impl Frame {
             label: Vec::with_capacity(n),
             backing: Vec::with_capacity(n),
             text: String::new(),
-            mappings: first_mapping..n as u32,
+            mappings: first_mapping..first_mapping + mappings.len() as u32,
         };
         let mut intern = Interner::default();
 
@@ -268,12 +290,42 @@ impl Frame {
             f.child_len[id.index()] = run.len() as u32;
         }
 
+        let mut next_leaf = first_mapping + mappings.len() as u32;
         for (i, run) in regions.iter().enumerate() {
             let region = NodeId(1 + i as u32);
-            for m in &mappings[run.clone()] {
+            for j in run.clone() {
+                let m = &mappings[j];
                 let label = intern.get(display_name(m.path));
                 let backing = intern.backing(m);
+                let id = NodeId(f.parent.len() as u32);
                 f.push(region, 2, m.addr, m.len, NodeKind::Mapping, label, backing);
+                f.child_start[id.index()] = next_leaf;
+                f.child_len[id.index()] = children(j).len() as u32;
+                next_leaf += children(j).len() as u32;
+            }
+        }
+
+        for (i, run) in regions.iter().enumerate() {
+            let _ = i;
+            for j in run.clone() {
+                let mapping = NodeId(first_mapping + j as u32);
+                for sub in children(j) {
+                    let label = intern.get(&sub.label);
+                    let kind = if sub.label.is_empty() {
+                        NodeKind::Gap
+                    } else {
+                        NodeKind::Section
+                    };
+                    f.push(
+                        mapping,
+                        3,
+                        sub.addr,
+                        sub.len,
+                        kind,
+                        label,
+                        Backing::default(),
+                    );
+                }
             }
         }
 
@@ -301,6 +353,51 @@ impl Frame {
         self.kind.push(kind);
         self.label.push(label);
         self.backing.push(backing);
+    }
+}
+
+/// A mapping's sections, clipped to it and with every uncovered byte filled by an unnamed gap,
+/// so the children sum to the parent exactly. A mapping nothing parsed keeps no children at all,
+/// since one gap covering the whole thing would be noise rather than information.
+pub fn fill_sections(mapping: &MappingFacts<'_>, sections: &[SubExtent]) -> Vec<SubExtent> {
+    if sections.is_empty() {
+        return Vec::new();
+    }
+    let end = mapping.end();
+    let mut out: Vec<SubExtent> = Vec::with_capacity(sections.len() * 2 + 1);
+    let mut cursor = mapping.addr;
+    for section in sections {
+        let start = section.addr.max(cursor);
+        let stop = (section.addr + section.len).min(end);
+        if stop <= start {
+            continue;
+        }
+        if start > cursor {
+            out.push(gap(cursor, start));
+        }
+        out.push(SubExtent {
+            addr: start,
+            len: stop - start,
+            label: section.label.clone(),
+            prot: section.prot,
+        });
+        cursor = stop;
+    }
+    if out.is_empty() {
+        return out;
+    }
+    if cursor < end {
+        out.push(gap(cursor, end));
+    }
+    out
+}
+
+fn gap(addr: u64, end: u64) -> SubExtent {
+    SubExtent {
+        addr,
+        len: end - addr,
+        label: String::new(),
+        prot: Prot::default(),
     }
 }
 

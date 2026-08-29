@@ -18,6 +18,7 @@ use crate::lod::{Hover, Lod};
 use crate::palette::Category;
 use crate::pin::{MAX_PAINTED, Pinned};
 use crate::scene::{SceneView, Target, subtree_tops};
+use crate::symbols::{Symbols, Tier};
 use crate::{BlockMaterials, FileNode, Mode, block_materials, camera_start};
 use bevy::window::PrimaryWindow;
 use traveler_core::NodeId;
@@ -207,14 +208,19 @@ pub fn spawn(
     }
 }
 
-pub fn setup_hud(mut commands: Commands, space: Res<Space>, traced: Res<Traced>) {
+pub fn setup_hud(
+    mut commands: Commands,
+    space: Res<Space>,
+    traced: Res<Traced>,
+    symbols: Res<Symbols>,
+) {
     let frame = &space.frame;
     let meta = space.capture.meta();
     commands.spawn((
         panel(Some(10.0), None, Some(10.0), None),
         BackgroundColor(PANEL),
         Text::new(format!(
-            "{} [{}]   observed under trace\n{} mapped in {} regions, {} mappings\nstop {:.2} ms over {} thread{}   layout {:.0} ms",
+            "{} [{}]   observed under trace\n{} mapped in {} regions, {} mappings\nstop {:.2} ms over {} thread{}   layout {:.0} ms\n{}",
             traced.0.name(),
             meta.pid,
             human_bytes(frame.weight(frame.root())),
@@ -224,6 +230,15 @@ pub fn setup_hud(mut commands: Commands, space: Res<Space>, traced: Res<Traced>)
             meta.threads,
             if meta.threads == 1 { "" } else { "s" },
             space.layout_ms,
+            // A person needs to know whether they are reading a name or a guess.
+            match symbols.tier() {
+                Tier::Two => format!(
+                    "tier 2: {} sections from {} images",
+                    thousands(symbols.sections() as u64),
+                    thousands(symbols.images() as u64)
+                ),
+                Tier::One => "tier 1: no image parsed, mappings only".to_string(),
+            },
         )),
         font(13.0),
         TextColor(INK_SECONDARY),
@@ -329,6 +344,7 @@ pub fn update_hover(
     space: Res<Space>,
     hover: Res<Hover>,
     pinned: Res<Pinned>,
+    mut symbols: ResMut<Symbols>,
     mut readout: Query<(&mut Text, &mut Visibility), With<SpaceHover>>,
 ) {
     let Ok((mut text, mut vis)) = readout.single_mut() else {
@@ -352,6 +368,22 @@ pub fn update_hover(
     };
     if let Some((path, offset)) = frame.backing(id) {
         out.push_str(&format!("\n{path} +{offset:#x}"));
+        // Tier 2's payoff: a name for an address, out of `.dynsym`, with no debug info anywhere.
+        let at = match target {
+            Target::Page { page, .. } => frame.addr(id) + page as u64 * PAGE,
+            Target::Node(_) => frame.addr(id),
+        };
+        let path = path.to_string();
+        if let Some((name, into)) = symbols.name_at(&path, at) {
+            out.push_str(&format!(
+                "\n{name}{}",
+                if into == 0 {
+                    String::new()
+                } else {
+                    format!(" +{into:#x}")
+                }
+            ));
+        }
     }
     if pinned.target == Some(target) {
         out.push_str("\npinned   click again or esc to release");
@@ -517,6 +549,7 @@ pub fn paint_pin(
 
 pub fn close(mut commands: Commands) {
     commands.remove_resource::<Space>();
+    commands.remove_resource::<Symbols>();
     commands.remove_resource::<PageView>();
     commands.remove_resource::<Traced>();
     commands.remove_resource::<Lod>();
