@@ -6,7 +6,7 @@
 //! rather than to its neighbours.
 
 use bevy::prelude::*;
-use traveler_scan::NodeId;
+use traveler_scan::{NodeId, Tree};
 
 use crate::City;
 use crate::lod::Hover;
@@ -71,7 +71,7 @@ pub fn update_pin(mut pinned: ResMut<Pinned>, city: Res<City>, mut last: Local<O
     };
     let index = &city.index;
 
-    pinned.biggest = index.children(root).max_by_key(|c| index.size(*c));
+    pinned.biggest = index.child_ids(root).max_by_key(|c| index.size(*c));
 
     // Children are contiguous but grandchildren are not, so the subtree needs a walk.
     let mut stack = vec![root];
@@ -88,7 +88,7 @@ pub fn update_pin(mut pinned: ResMut<Pinned>, city: Res<City>, mut last: Local<O
         } else {
             pinned.painted_all = false;
         }
-        for c in index.children(id) {
+        for c in index.child_ids(id) {
             stack.push(c);
         }
     }

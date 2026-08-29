@@ -25,7 +25,7 @@
 //! spacing. The same group always produces the same cluster.
 
 use glam::{Vec2, Vec3};
-use traveler_scan::{FileIndex, NodeId};
+use traveler_core::{NodeId, Tree};
 
 use crate::Placements;
 
@@ -99,8 +99,8 @@ impl Satellite {
 ///
 /// `city` supplies where each member actually sits, which is what lets the cluster preserve
 /// direction. The order of `members` on the way in does not matter.
-pub fn lay_out(
-    index: &FileIndex,
+pub fn lay_out<T: Tree>(
+    tree: &T,
     members: &[NodeId],
     city: &Placements,
     params: &SatelliteParams,
@@ -114,7 +114,8 @@ pub fn lay_out(
 
     // Bucket by parent folder. Members arrive in id order, which is walk order, so the members of
     // one folder are already contiguous and a sort by parent is nearly free.
-    let mut by_parent: Vec<(NodeId, NodeId)> = members.iter().map(|m| (index.parent(*m), *m)).collect();
+    let mut by_parent: Vec<(NodeId, NodeId)> =
+        members.iter().map(|m| (tree.parent(*m), *m)).collect();
     by_parent.sort_unstable();
 
     let mut buckets: Vec<(NodeId, Vec<NodeId>)> = Vec::new();
@@ -190,7 +191,7 @@ pub fn lay_out(
         // Ordering inside a clump is by size then id: stable, and it puts the big one on the
         // outside edge rather than scattering by whatever order the scan happened to use.
         let mut sorted = list.clone();
-        sorted.sort_unstable_by(|a, b| index.size(*b).cmp(&index.size(*a)).then(a.cmp(b)));
+        sorted.sort_unstable_by(|a, b| tree.weight(*b).cmp(&tree.weight(*a)).then(a.cmp(b)));
 
         let n = sorted.len();
         for (j, member) in sorted.into_iter().enumerate() {

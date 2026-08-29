@@ -1,0 +1,10 @@
+[package]
+name = "traveler-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+
+[lib]
+name = "traveler_core"
+path = "src/lib.rs"

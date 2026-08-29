@@ -5,7 +5,7 @@
 
 use std::{cmp::Reverse, path::PathBuf, process::ExitCode};
 
-use traveler_scan::{ExtId, NodeId, ScanOptions, human_bytes, scan, thousands};
+use traveler_scan::{ExtId, NodeId, ScanOptions, Tree, human_bytes, scan, thousands};
 
 struct Args {
     path: PathBuf,
@@ -143,7 +143,7 @@ fn main() -> ExitCode {
     let mut by_ext: Vec<(u64, u64)> = vec![(0, 0); index.ext_count()];
     let mut largest: Vec<(u64, NodeId)> = Vec::new();
     let mut max_depth = 0u16;
-    for id in index.iter() {
+    for id in index.nodes() {
         max_depth = max_depth.max(index.depth(id));
         if index.flags(id).is_dir() {
             continue;

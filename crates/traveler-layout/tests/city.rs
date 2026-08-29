@@ -8,7 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use traveler_layout::{CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements, svg};
-use traveler_scan::{FileIndex, NodeId, ScanOptions, scan};
+use traveler_scan::{FileIndex, NodeId, ScanOptions, Tree, scan};
 
 /// Nested tree with a heavy-tailed size distribution and a scattering of zero-byte files, which
 /// is where naive treemap code divides by zero.
@@ -84,12 +84,12 @@ fn every_child_stays_inside_its_parent() {
     let index = fx.scan();
     for params in [CityParams::default(), raw_params()] {
         let p = lay_out(&index, params);
-        for id in index.iter() {
+        for id in index.nodes() {
             if !p.is_visible(id) {
                 continue;
             }
             let (x0, z0, x1, z1) = p.footprint(id);
-            for c in index.children(id) {
+            for c in index.child_ids(id) {
                 if !p.is_visible(c) {
                     continue;
                 }
@@ -110,8 +110,8 @@ fn siblings_never_overlap() {
     let index = fx.scan();
     for params in [CityParams::default(), raw_params()] {
         let p = lay_out(&index, params);
-        for id in index.iter() {
-            let kids: Vec<NodeId> = index.children(id).filter(|c| p.is_visible(*c)).collect();
+        for id in index.nodes() {
+            let kids: Vec<NodeId> = index.child_ids(id).filter(|c| p.is_visible(*c)).collect();
             for i in 0..kids.len() {
                 let (ax0, az0, ax1, az1) = p.footprint(kids[i]);
                 for j in (i + 1)..kids.len() {
@@ -138,7 +138,7 @@ fn packing_conserves_area() {
     let index = fx.scan();
     let p = lay_out(&index, raw_params());
 
-    for id in index.iter() {
+    for id in index.nodes() {
         if !p.is_visible(id) || index.child_count(id) == 0 {
             continue;
         }
@@ -148,7 +148,7 @@ fn packing_conserves_area() {
             continue;
         }
         let child_area: f64 = index
-            .children(id)
+            .child_ids(id)
             .filter(|c| p.is_visible(*c))
             .map(|c| {
                 let s = p.size[c.index()];
@@ -178,7 +178,7 @@ fn areas_are_proportional_to_bytes_when_nothing_is_floored() {
     );
 
     let kids: Vec<NodeId> = index
-        .children(index.root())
+        .child_ids(index.root())
         .filter(|c| p.is_visible(*c) && index.size(*c) > 100_000)
         .collect();
     assert!(kids.len() >= 2, "fixture needs a few substantial top dirs");
@@ -208,7 +208,7 @@ fn areas_track_the_floored_weight_by_default() {
     let weights = traveler_layout::layout_weights(&index, params.min_leaf_weight);
 
     let kids: Vec<NodeId> = index
-        .children(index.root())
+        .child_ids(index.root())
         .filter(|c| p.is_visible(*c))
         .collect();
     assert!(kids.len() >= 2);
@@ -234,7 +234,7 @@ fn zero_byte_files_still_get_a_footprint() {
     let p = lay_out(&index, CityParams::default());
 
     let mut checked = 0;
-    for id in index.iter() {
+    for id in index.nodes() {
         if index.flags(id).is_dir() || index.size(id) != 0 {
             continue;
         }
@@ -247,7 +247,7 @@ fn zero_byte_files_still_get_a_footprint() {
 
     // Empty directories too.
     let empties: Vec<NodeId> = index
-        .iter()
+        .nodes()
         .filter(|id| index.name(*id) == "empty")
         .collect();
     assert!(!empties.is_empty());
@@ -264,12 +264,12 @@ fn children_sit_on_top_of_their_parent() {
     let p = lay_out(&index, params);
 
     let base = |id: NodeId| p.center[id.index()].y - p.size[id.index()].y * 0.5;
-    for id in index.iter() {
+    for id in index.nodes() {
         if !p.is_visible(id) {
             continue;
         }
         let top = base(id) + params.level_step;
-        for c in index.children(id) {
+        for c in index.child_ids(id) {
             if !p.is_visible(c) {
                 continue;
             }
@@ -325,7 +325,7 @@ fn uniform_height_flattens_only_the_files() {
     };
     let p = lay_out(&index, params);
 
-    for id in index.iter() {
+    for id in index.nodes() {
         if !p.is_visible(id) || index.flags(id).is_dir() {
             continue;
         }
@@ -334,7 +334,7 @@ fn uniform_height_flattens_only_the_files() {
 
     // Footprints must not change when only the height channel changes.
     let log = lay_out(&index, CityParams::default());
-    for id in index.iter() {
+    for id in index.nodes() {
         assert_eq!(p.size[id.index()].x, log.size[id.index()].x);
         assert_eq!(p.size[id.index()].z, log.size[id.index()].z);
     }
@@ -368,7 +368,7 @@ fn log_height_spans_the_full_range() {
     let p = lay_out(&index, params);
 
     let biggest = index
-        .iter()
+        .nodes()
         .filter(|id| !index.flags(*id).is_dir())
         .max_by_key(|id| index.size(*id))
         .expect("a file");
@@ -384,7 +384,7 @@ fn log_height_spans_the_full_range() {
     );
 
     let empty = index
-        .iter()
+        .nodes()
         .find(|id| !index.flags(*id).is_dir() && index.size(*id) == 0)
         .expect("a zero-byte file");
     assert!((p.size[empty.index()].y - params.file_thickness).abs() < 0.01);

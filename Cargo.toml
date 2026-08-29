@@ -1,6 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/traveler-scan", "crates/traveler-layout", "crates/traveler-edges", "crates/traveler-app", "spike"]
+members = [
+    "crates/traveler-core",
+    "crates/traveler-scan",
+    "crates/traveler-layout",
+    "crates/traveler-edges",
+    "crates/traveler-app",
+    "spike",
+]
 
 [workspace.package]
 edition = "2024"

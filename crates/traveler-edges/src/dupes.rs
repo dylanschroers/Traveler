@@ -22,7 +22,7 @@ use std::{
 };
 
 use rayon::prelude::*;
-use traveler_scan::{FileIndex, NodeId};
+use traveler_scan::{FileIndex, NodeId, Tree};
 
 use crate::{EdgeKind, EdgeProvider, EdgeSet, EdgeStats, Group};
 
@@ -68,7 +68,7 @@ impl EdgeProvider for ExactDuplicates {
 
         // Stage 1: same length, or it cannot be a duplicate.
         let mut by_size: Vec<(u64, NodeId)> = index
-            .iter()
+            .nodes()
             .filter(|id| !index.flags(*id).is_dir() && index.size(*id) >= self.min_size.max(1))
             .map(|id| (index.size(id), id))
             .collect();
@@ -76,7 +76,7 @@ impl EdgeProvider for ExactDuplicates {
 
         // What the floor cost us, so the tradeoff is visible rather than silent.
         let mut small: Vec<(u64, NodeId)> = index
-            .iter()
+            .nodes()
             .filter(|id| {
                 !index.flags(*id).is_dir()
                     && index.size(*id) > 0

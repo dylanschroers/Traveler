@@ -9,7 +9,7 @@
 //! tree reads as terraces from a distance.
 
 use glam::Vec3;
-use traveler_scan::NodeId;
+use traveler_core::{NodeId, Tree};
 
 use crate::{Layout, LayoutCtx, Placements, Rect, layout_weights};
 
@@ -101,8 +101,8 @@ impl Layout for CityLayout {
         "city"
     }
 
-    fn place(&self, ctx: &LayoutCtx<'_>, out: &mut Placements) {
-        let index = ctx.index;
+    fn place<T: Tree>(&self, ctx: &LayoutCtx<'_, T>, out: &mut Placements) {
+        let index = ctx.tree;
         let p = &self.params;
         let n = index.len();
         out.reset(n);
@@ -115,9 +115,9 @@ impl Layout for CityLayout {
         // make this the root's total bytes and no file would ever reach the maximum thickness.
         let log_denom = {
             let max_file = index
-                .iter()
-                .filter(|id| !index.flags(*id).is_dir())
-                .map(|id| index.size(id))
+                .nodes()
+                .filter(|id| !index.is_group(*id))
+                .map(|id| index.weight(id))
                 .max()
                 .unwrap_or(0);
             (1.0 + max_file as f64).log10().max(1.0)
@@ -145,11 +145,10 @@ impl Layout for CityLayout {
                 continue;
             }
 
-            let is_dir = index.flags(id).is_dir();
-            let thickness = if is_dir {
+            let thickness = if index.is_group(id) {
                 p.level_step
             } else {
-                self.file_thickness(index.size(id) as f64, log_denom)
+                self.file_thickness(index.weight(id) as f64, log_denom)
             };
             let base = index.depth(id) as f32 * p.level_step;
 
@@ -181,7 +180,7 @@ impl Layout for CityLayout {
 
             items.clear();
             let mut total = 0.0;
-            for child in index.children(id) {
+            for child in index.child_ids(id) {
                 let w = weights[child.index()];
                 total += w;
                 items.push((child, w));

@@ -5144,6 +5144,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "traveler-core"
+version = "0.1.0"
+
+[[package]]
 name = "traveler-edges"
 version = "0.1.0"
 dependencies = [
@@ -5157,6 +5161,7 @@ name = "traveler-layout"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "traveler-core",
  "traveler-scan",
 ]
 
@@ -5165,6 +5170,7 @@ name = "traveler-scan"
 version = "0.1.0"
 dependencies = [
  "rayon",
+ "traveler-core",
 ]
 
 [[package]]

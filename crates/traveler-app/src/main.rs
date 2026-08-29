@@ -28,7 +28,7 @@ use satellite::SatelliteView;
 use palette::{Category, CategoryTable};
 use traveler_layout::{CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements};
 use traveler_edges::{EdgeProvider, ExtensionGroups, NameFamilies};
-use traveler_scan::{FileIndex, NodeId, ScanOptions, human_bytes, scan};
+use traveler_scan::{FileIndex, NodeId, ScanOptions, Tree, human_bytes, scan};
 
 /// The block materials, kept so a highlighted node can be put back the way it was.
 #[derive(Resource)]
@@ -59,7 +59,8 @@ pub struct City {
 impl City {
     fn relayout(&mut self) {
         let started = std::time::Instant::now();
-        CityLayout::new(self.params).place(&LayoutCtx::new(&self.index), &mut self.placements);
+        let ctx = LayoutCtx::new(self.index.as_ref());
+        CityLayout::new(self.params).place(&ctx, &mut self.placements);
         self.layout_ms = started.elapsed().as_secs_f64() * 1000.0;
         self.subtree_top = subtree_tops(&self.index, &self.placements);
     }
@@ -452,7 +453,7 @@ fn spawn_city(
         let index = &city.index;
         let places = &city.placements;
         let table = &city.categories;
-        for id in index.iter() {
+        for id in index.nodes() {
             if !places.is_visible(id) {
                 continue;
             }

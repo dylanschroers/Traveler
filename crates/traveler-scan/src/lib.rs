@@ -16,16 +16,9 @@ mod walk;
 
 pub use walk::{ScanOptions, scan};
 
-/// Index of a node in a [`FileIndex`]. The root is always `NodeId(0)`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub struct NodeId(pub u32);
+use std::ops::Range;
 
-impl NodeId {
-    #[inline]
-    pub fn index(self) -> usize {
-        self.0 as usize
-    }
-}
+pub use traveler_core::{NodeId, Tree, human_bytes, thousands};
 
 /// Interned file extension. `ExtId(0)` is always the empty extension.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -103,23 +96,41 @@ pub struct FileIndex {
     pub stats: ScanStats,
 }
 
-impl FileIndex {
+impl Tree for FileIndex {
     #[inline]
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.parent.len()
     }
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.parent.is_empty()
-    }
-    #[inline]
-    pub fn root(&self) -> NodeId {
+    fn root(&self) -> NodeId {
         NodeId(0)
     }
     #[inline]
-    pub fn parent(&self, id: NodeId) -> NodeId {
+    fn parent(&self, id: NodeId) -> NodeId {
         self.parent[id.index()]
     }
+    #[inline]
+    fn children(&self, id: NodeId) -> Range<u32> {
+        let start = self.child_start[id.index()];
+        start..start + self.child_len[id.index()]
+    }
+    #[inline]
+    fn depth(&self, id: NodeId) -> u16 {
+        self.depth[id.index()]
+    }
+    #[inline]
+    fn weight(&self, id: NodeId) -> u64 {
+        self.size[id.index()]
+    }
+    /// An empty directory has no children but is still a folder, and drawing it as a file would
+    /// give it a file's thickness.
+    #[inline]
+    fn is_group(&self, id: NodeId) -> bool {
+        self.flags[id.index()].is_dir()
+    }
+}
+
+impl FileIndex {
     #[inline]
     pub fn size(&self, id: NodeId) -> u64 {
         self.size[id.index()]
@@ -127,10 +138,6 @@ impl FileIndex {
     #[inline]
     pub fn flags(&self, id: NodeId) -> NodeFlags {
         self.flags[id.index()]
-    }
-    #[inline]
-    pub fn depth(&self, id: NodeId) -> u16 {
-        self.depth[id.index()]
     }
     #[inline]
     pub fn ext(&self, id: NodeId) -> ExtId {
@@ -151,25 +158,6 @@ impl FileIndex {
     #[inline]
     pub fn ext_count(&self) -> usize {
         self.ext_text.len()
-    }
-
-    /// Children of `id`, always a contiguous id range.
-    #[inline]
-    pub fn children(&self, id: NodeId) -> impl Iterator<Item = NodeId> + use<> {
-        let start = self.child_start[id.index()];
-        let end = start + self.child_len[id.index()];
-        (start..end).map(NodeId)
-    }
-
-    #[inline]
-    pub fn child_count(&self, id: NodeId) -> u32 {
-        self.child_len[id.index()]
-    }
-
-    /// Every node in id order. Parents always precede their children.
-    #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = NodeId> + use<> {
-        (0..self.parent.len() as u32).map(NodeId)
     }
 
     /// Rebuilds the full path by walking up to the root.
@@ -198,33 +186,4 @@ impl ExtId {
     fn index_usize(self) -> usize {
         self.0 as usize
     }
-}
-
-/// Byte and count formatting. Lives here because both CLIs and the app print the same numbers and
-/// they should read identically; it is the crate everything else already depends on.
-pub fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    let mut v = bytes as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u < UNITS.len() - 1 {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{v:.1} {}", UNITS[u])
-    }
-}
-
-pub fn thousands(n: u64) -> String {
-    let s = n.to_string();
-    let mut out = String::with_capacity(s.len() + s.len() / 3);
-    for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
 }

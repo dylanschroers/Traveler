@@ -1,8 +1,9 @@
-//! Phase 2: turn a `FileIndex` into positions.
+//! Phase 2: turn a tree into positions.
 //!
-//! A layout is a pure function. It takes the index, it returns one block per node, and it knows
-//! nothing about rendering. That is what makes the city/graph switch in phase 5 cheap: node ids
-//! are stable across layouts, so switching views is interpolating two `Placements`.
+//! A layout is a pure function. It takes a [`Tree`], it returns one block per node, and it knows
+//! nothing about rendering or about where the tree came from. That is what makes the city/graph
+//! switch in phase 5 cheap: node ids are stable across layouts, so switching views is
+//! interpolating two `Placements`.
 //!
 //! Nothing here depends on bevy, only on `glam`, so the whole thing is testable headlessly.
 
@@ -13,24 +14,26 @@ pub mod svg;
 pub use city::{CityLayout, CityParams, HeightMode};
 
 use glam::Vec3;
-use traveler_scan::{FileIndex, NodeId};
+use traveler_core::{NodeId, Tree};
 
 /// Everything a layout is allowed to look at.
 ///
 /// A struct rather than bare arguments so phase 4 can add `edges` without touching the trait.
-pub struct LayoutCtx<'a> {
-    pub index: &'a FileIndex,
+pub struct LayoutCtx<'a, T> {
+    pub tree: &'a T,
 }
 
-impl<'a> LayoutCtx<'a> {
-    pub fn new(index: &'a FileIndex) -> Self {
-        Self { index }
+impl<'a, T: Tree> LayoutCtx<'a, T> {
+    pub fn new(tree: &'a T) -> Self {
+        Self { tree }
     }
 }
 
 pub trait Layout {
     fn name(&self) -> &'static str;
-    fn place(&self, ctx: &LayoutCtx<'_>, out: &mut Placements);
+    /// Generic rather than `dyn`: the treemap touches the tree once per node per layout, and a
+    /// vtable hop in that loop is measurable at a million nodes.
+    fn place<T: Tree>(&self, ctx: &LayoutCtx<'_, T>, out: &mut Placements);
 }
 
 /// One axis-aligned block per node, parallel to the index.
@@ -142,18 +145,18 @@ impl Rect {
 /// The floor is applied to leaves only and summed upward, never applied to a directory directly.
 /// Nested treemaps need a directory's weight to equal the sum of its children's exactly, and any
 /// per-node transform of an already-summed value breaks that.
-pub fn layout_weights(index: &FileIndex, min_leaf: f64) -> Vec<f64> {
-    let n = index.len();
+pub fn layout_weights<T: Tree>(tree: &T, min_leaf: f64) -> Vec<f64> {
+    let n = tree.len();
     let mut w = vec![0.0f64; n];
     for (i, weight) in w.iter_mut().enumerate() {
         let id = NodeId(i as u32);
-        if index.child_count(id) == 0 {
-            *weight = (index.size(id) as f64).max(min_leaf);
+        if tree.child_count(id) == 0 {
+            *weight = (tree.weight(id) as f64).max(min_leaf);
         }
     }
     // Children always have a higher id than their parent, so one reverse pass sums every subtree.
     for i in (1..n).rev() {
-        let p = index.parent(NodeId(i as u32)).index();
+        let p = tree.parent(NodeId(i as u32)).index();
         w[p] += w[i];
     }
     w

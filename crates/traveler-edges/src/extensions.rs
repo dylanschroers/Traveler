@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use traveler_scan::{ExtId, FileIndex};
+use traveler_scan::{ExtId, FileIndex, Tree};
 
 use crate::{EdgeKind, EdgeProvider, EdgeSet, EdgeStats, Group};
 
@@ -19,7 +19,7 @@ impl EdgeProvider for ExtensionGroups {
         let mut members = vec![Vec::new(); n];
         let mut bytes = vec![0u64; n];
 
-        for id in index.iter() {
+        for id in index.nodes() {
             if index.flags(id).is_dir() {
                 continue;
             }

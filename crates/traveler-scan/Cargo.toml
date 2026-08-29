@@ -4,6 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+traveler-core = { path = "../traveler-core" }
 rayon = "1"
 
 [lib]

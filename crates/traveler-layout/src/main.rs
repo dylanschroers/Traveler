@@ -7,7 +7,7 @@ use traveler_layout::{
     CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements,
     svg::{self, SvgParams},
 };
-use traveler_scan::{ScanOptions, scan};
+use traveler_scan::{ExtId, ScanOptions, Tree, scan};
 
 const USAGE: &str = "\
 usage: traveler-layout <path> [options]
@@ -128,14 +128,14 @@ fn main() -> ExitCode {
     // Independent check that the packing conserves area, walked here rather than trusted.
     let mut worst_area_err = 0.0f64;
     let mut worst_overflow = 0.0f32;
-    for id in index.iter() {
+    for id in index.nodes() {
         if !placements.is_visible(id) || index.child_count(id) == 0 {
             continue;
         }
         let (px0, pz0, px1, pz1) = placements.footprint(id);
         let mut child_area = 0.0f64;
         let mut any = false;
-        for c in index.children(id) {
+        for c in index.child_ids(id) {
             if !placements.is_visible(c) {
                 continue;
             }
@@ -167,7 +167,7 @@ fn main() -> ExitCode {
     // from above.
     let root = index.root();
     let districts: Vec<_> = index
-        .children(root)
+        .child_ids(root)
         .filter(|c| placements.is_visible(*c))
         .collect();
     println!("
@@ -212,7 +212,7 @@ fn main() -> ExitCode {
     }
 
     if let Some(out) = svg_out {
-        let doc = svg::render(&index, &placements, &svg_params);
+        let doc = svg::render(&index, &placements, &svg_params, |id| ext_color(index.ext(id)));
         if let Err(e) = std::fs::write(&out, doc.as_bytes()) {
             eprintln!("error: cannot write {}: {e}", out.display());
             return ExitCode::FAILURE;
@@ -226,6 +226,42 @@ fn main() -> ExitCode {
     println!();
 
     ExitCode::SUCCESS
+}
+
+/// Stable pseudo-random hue per extension. The app has a validated categorical palette; this
+/// dump only needs neighbouring extensions to look different.
+fn ext_color(ext: ExtId) -> [u8; 3] {
+    if ext.0 == 0 {
+        return [0x5b, 0x64, 0x70];
+    }
+    let mut x = (ext.0 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    x ^= x >> 29;
+    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    x ^= x >> 32;
+    let hue = (x % 360) as f64;
+    let sat = 0.45 + ((x >> 12) % 30) as f64 / 100.0;
+    let light = 0.45 + ((x >> 24) % 20) as f64 / 100.0;
+    hsl_to_rgb(hue, sat, light)
+}
+
+fn hsl_to_rgb(h: f64, s: f64, l: f64) -> [u8; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r, g, b) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c * 0.5;
+    [
+        ((r + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((g + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((b + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
 }
 
 fn usage(msg: &str) -> ExitCode {

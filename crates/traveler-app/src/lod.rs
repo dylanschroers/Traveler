@@ -17,7 +17,7 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use traveler_scan::NodeId;
+use traveler_scan::{NodeId, Tree};
 
 use crate::{City, FileNode};
 
@@ -130,7 +130,7 @@ pub fn update_lod(
         lod.seen_stamp[id.index()] = frame;
         if expand {
             lod.expand_stamp[id.index()] = frame;
-            for c in index.children(id) {
+            for c in index.child_ids(id) {
                 lod.stack.push(c.0);
             }
         }

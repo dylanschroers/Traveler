@@ -5,7 +5,7 @@ use std::{path::PathBuf, process::ExitCode};
 use traveler_edges::{
     EdgeKind, EdgeProvider, EdgeSet, ExactDuplicates, ExtensionGroups, NameFamilies,
 };
-use traveler_scan::{ScanOptions, human_bytes, scan, thousands};
+use traveler_scan::{ScanOptions, Tree, human_bytes, scan, thousands};
 
 const USAGE: &str = "\
 usage: traveler-edges <path> [options]

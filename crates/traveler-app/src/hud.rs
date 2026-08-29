@@ -13,7 +13,7 @@ use crate::pin::{MAX_PAINTED, Pinned};
 use crate::satellite::SatelliteView;
 use crate::palette::{CATEGORY_COUNT, Category, top_extensions};
 use crate::City;
-use traveler_scan::{human_bytes, thousands};
+use traveler_scan::{Tree, human_bytes, thousands};
 
 const INK_PRIMARY: Color = Color::srgb(1.0, 1.0, 1.0);
 const INK_SECONDARY: Color = Color::srgb(0.765, 0.761, 0.718);

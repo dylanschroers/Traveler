@@ -18,7 +18,7 @@
 //!   worst CVD ΔE 9.4 (deutan), worst normal-vision ΔE 20.9, all three ≥ 3:1 contrast.
 
 use bevy::prelude::*;
-use traveler_scan::{ExtId, FileIndex};
+use traveler_scan::{ExtId, FileIndex, Tree};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Category {
@@ -193,7 +193,7 @@ pub fn top_extensions(
     n: usize,
 ) -> Vec<(String, u64, Category)> {
     let mut bytes = vec![0u64; index.ext_count()];
-    for id in index.iter() {
+    for id in index.nodes() {
         if !index.flags(id).is_dir() {
             bytes[index.ext(id).0 as usize] += index.size(id);
         }

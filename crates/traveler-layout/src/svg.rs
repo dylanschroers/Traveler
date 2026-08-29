@@ -4,7 +4,7 @@
 //! footprint only: directories as outlines, files filled by extension. Property tests prove the
 //! geometry is correct, this shows whether it is any good.
 
-use traveler_scan::FileIndex;
+use traveler_core::{NodeId, Tree};
 
 use crate::Placements;
 
@@ -28,7 +28,14 @@ impl Default for SvgParams {
     }
 }
 
-pub fn render(index: &FileIndex, placements: &Placements, params: &SvgParams) -> String {
+/// `fill` supplies the colour of a content node. Containers are drawn as outlines and never ask
+/// for one, so a caller with no palette can return anything.
+pub fn render<T: Tree>(
+    tree: &T,
+    placements: &Placements,
+    params: &SvgParams,
+    fill: impl Fn(NodeId) -> [u8; 3],
+) -> String {
     let span_x = (placements.max.x - placements.min.x) as f64;
     let span_z = (placements.max.z - placements.min.z) as f64;
     let span = span_x.max(span_z).max(1e-9);
@@ -47,7 +54,7 @@ pub fn render(index: &FileIndex, placements: &Placements, params: &SvgParams) ->
     // comes out right with no sorting.
     let mut drawn = 0usize;
     let mut skipped = 0usize;
-    for id in index.iter() {
+    for id in tree.nodes() {
         if !placements.is_visible(id) {
             continue;
         }
@@ -64,18 +71,18 @@ pub fn render(index: &FileIndex, placements: &Placements, params: &SvgParams) ->
         }
         drawn += 1;
 
-        if index.flags(id).is_dir() {
-            let depth = index.depth(id).min(9) as f64;
+        if tree.is_group(id) {
+            let depth = tree.depth(id).min(9) as f64;
             let alpha = 0.55 - depth * 0.05;
             out.push_str(&format!(
                 r##"<rect x="{px0:.2}" y="{pz0:.2}" width="{w:.2}" height="{h:.2}" fill="none" stroke="#7f8ea3" stroke-opacity="{alpha:.2}" stroke-width="0.6"/>
 "##
             ));
         } else {
-            let fill = ext_color(index.ext(id).0);
+            let [r, g, b] = fill(id);
             out.push_str(&format!(
-                r#"<rect x="{px0:.2}" y="{pz0:.2}" width="{w:.2}" height="{h:.2}" fill="{fill}"/>
-"#
+                r##"<rect x="{px0:.2}" y="{pz0:.2}" width="{w:.2}" height="{h:.2}" fill="#{r:02x}{g:02x}{b:02x}"/>
+"##
             ));
         }
     }
@@ -87,49 +94,12 @@ pub fn render(index: &FileIndex, placements: &Placements, params: &SvgParams) ->
     out
 }
 
-/// Stable pseudo-random hue per extension. Phase 3 replaces this with a real categorical palette
-/// over the top extensions by bytes.
-fn ext_color(ext: u32) -> String {
-    if ext == 0 {
-        return "#5b6470".into();
-    }
-    let mut x = (ext as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-    x ^= x >> 29;
-    x = x.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    x ^= x >> 32;
-    let hue = (x % 360) as f64;
-    let sat = 0.45 + ((x >> 12) % 30) as f64 / 100.0;
-    let light = 0.45 + ((x >> 24) % 20) as f64 / 100.0;
-    let (r, g, b) = hsl_to_rgb(hue, sat, light);
-    format!("#{r:02x}{g:02x}{b:02x}")
-}
-
-fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
-    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
-    let hp = h / 60.0;
-    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
-    let (r, g, b) = match hp as u32 {
-        0 => (c, x, 0.0),
-        1 => (x, c, 0.0),
-        2 => (0.0, c, x),
-        3 => (0.0, x, c),
-        4 => (x, 0.0, c),
-        _ => (c, 0.0, x),
-    };
-    let m = l - c * 0.5;
-    (
-        ((r + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((g + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-        ((b + m) * 255.0).round().clamp(0.0, 255.0) as u8,
-    )
-}
-
 /// Aspect ratio stats over placed leaf footprints. This is the numeric read on whether the
 /// treemap is actually squarified: values near 1 are square, large values are slivers.
-pub fn aspect_stats(index: &FileIndex, placements: &Placements) -> AspectStats {
+pub fn aspect_stats<T: Tree>(tree: &T, placements: &Placements) -> AspectStats {
     let mut ratios: Vec<f32> = Vec::new();
-    for id in index.iter() {
-        if !placements.is_visible(id) || index.flags(id).is_dir() {
+    for id in tree.nodes() {
+        if !placements.is_visible(id) || tree.is_group(id) {
             continue;
         }
         let s = placements.size[id.index()];

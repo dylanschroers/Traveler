@@ -3,7 +3,7 @@
 use std::{collections::HashMap, fs, path::PathBuf};
 
 use traveler_edges::{EdgeProvider, ExactDuplicates, ExtensionGroups, Group, NameFamilies};
-use traveler_scan::{FileIndex, ScanOptions, scan};
+use traveler_scan::{FileIndex, ScanOptions, Tree, scan};
 
 struct Fixture(PathBuf);
 
@@ -116,7 +116,7 @@ fn name_families_find_shared_stems_within_one_folder() {
 
     // main.c shares a folder with the parser pair but not a stem, so it is in no family.
     let main_id = index
-        .iter()
+        .nodes()
         .find(|id| index.name(*id) == "main.c")
         .expect("main.c");
     assert!(
@@ -200,7 +200,7 @@ fn a_file_smaller_than_the_prefix_needs_only_one_pass() {
     // and nothing twice. Derived from the index rather than hand-counted, because "which files
     // happen to share a length" is not obvious by eye: two of the sources here are both 16 bytes.
     let mut counts: HashMap<u64, u64> = HashMap::new();
-    for id in index.iter() {
+    for id in index.nodes() {
         if !index.flags(id).is_dir() && index.size(id) > 0 {
             *counts.entry(index.size(id)).or_default() += 1;
         }

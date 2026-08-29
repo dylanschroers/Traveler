@@ -2,7 +2,7 @@
 
 use std::{fs, path::PathBuf};
 
-use traveler_scan::{ScanOptions, scan};
+use traveler_scan::{ScanOptions, Tree, scan};
 
 struct Fixture(PathBuf);
 
@@ -58,7 +58,7 @@ fn sizes_roll_up_per_directory() {
 
     let find = |name: &str| {
         index
-            .iter()
+            .nodes()
             .find(|id| index.name(*id) == name)
             .unwrap_or_else(|| panic!("no node named {name}"))
     };
@@ -77,7 +77,7 @@ fn extensions_are_interned_case_insensitively() {
 
     let mut txt_bytes = 0;
     let mut txt_files = 0;
-    for id in index.iter() {
+    for id in index.nodes() {
         if !index.flags(id).is_dir() && index.ext_str(index.ext(id)) == "txt" {
             txt_bytes += index.size(id);
             txt_files += 1;
@@ -87,7 +87,7 @@ fn extensions_are_interned_case_insensitively() {
     assert_eq!(txt_bytes, 153);
 
     // Directories never carry an extension, even when their name looks like it has one.
-    for id in index.iter() {
+    for id in index.nodes() {
         if index.flags(id).is_dir() {
             assert_eq!(index.ext_str(index.ext(id)), "");
         }
@@ -100,7 +100,7 @@ fn structure_invariants_hold() {
     let index = scan(&fx.0, &ScanOptions::default()).unwrap();
 
     let mut seen = vec![false; index.len()];
-    for id in index.iter() {
+    for id in index.nodes() {
         // Parent before child is what makes the reverse-scan rollup correct.
         if id != index.root() {
             assert!(
@@ -110,7 +110,7 @@ fn structure_invariants_hold() {
         }
 
         // Children are a contiguous run, and every one of them points back.
-        let kids: Vec<_> = index.children(id).collect();
+        let kids: Vec<_> = index.child_ids(id).collect();
         assert_eq!(kids.len(), index.child_count(id) as usize);
         for (i, kid) in kids.iter().enumerate() {
             assert_eq!(index.parent(*kid), id);
@@ -123,7 +123,7 @@ fn structure_invariants_hold() {
     }
 
     // Every node except the root is some directory's child.
-    for id in index.iter() {
+    for id in index.nodes() {
         if id != index.root() {
             assert!(seen[id.index()], "node {id:?} is orphaned");
         }
@@ -136,7 +136,7 @@ fn paths_rebuild_from_names_and_parents() {
     let index = scan(&fx.0, &ScanOptions::default()).unwrap();
 
     let d = index
-        .iter()
+        .nodes()
         .find(|id| index.name(*id) == "d.txt")
         .expect("d.txt");
     assert_eq!(index.path(d), fx.0.join("sub").join("deep").join("d.txt"));
@@ -177,7 +177,7 @@ fn directory_junctions_are_directories_and_are_not_followed() {
 
     let index = scan(&fx.0, &ScanOptions::default()).unwrap();
     let id = index
-        .iter()
+        .nodes()
         .find(|id| index.name(*id) == "link_to_sub")
         .expect("junction node");
 

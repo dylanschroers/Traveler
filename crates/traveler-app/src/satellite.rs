@@ -62,7 +62,12 @@ pub fn update_satellite(
         ..Default::default()
     };
     view.data = match edges.selected_group() {
-        Some(group) => lay_out(&city.index, &group.members, &city.placements, &params),
+        Some(group) => lay_out(
+            city.index.as_ref(),
+            &group.members,
+            &city.placements,
+            &params,
+        ),
         None => Satellite::default(),
     };
 

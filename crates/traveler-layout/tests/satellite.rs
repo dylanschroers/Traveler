@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use traveler_layout::satellite::{SatelliteParams, lay_out};
 use traveler_layout::{CityLayout, CityParams, Layout, LayoutCtx, Placements};
-use traveler_scan::{FileIndex, NodeId, ScanOptions, scan};
+use traveler_scan::{FileIndex, NodeId, ScanOptions, Tree, scan};
 
 struct Fixture(PathBuf);
 
@@ -48,7 +48,7 @@ fn city_of(index: &FileIndex) -> Placements {
 
 fn all_bin_files(index: &FileIndex) -> Vec<NodeId> {
     index
-        .iter()
+        .nodes()
         .filter(|id| !index.flags(*id).is_dir() && index.ext_str(index.ext(*id)) == "bin")
         .collect()
 }

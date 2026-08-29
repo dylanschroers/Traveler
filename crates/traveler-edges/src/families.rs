@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use traveler_scan::{FileIndex, NodeId};
+use traveler_scan::{FileIndex, NodeId, Tree};
 
 use crate::{EdgeKind, EdgeProvider, EdgeSet, EdgeStats, Group};
 
@@ -37,7 +37,7 @@ impl EdgeProvider for NameFamilies {
         // Reused per directory so a tree of 100k folders does not allocate 100k vectors.
         let mut scratch: Vec<(&str, NodeId)> = Vec::new();
 
-        for dir in index.iter() {
+        for dir in index.nodes() {
             if index.child_count(dir) < 2 {
                 continue;
             }
@@ -50,7 +50,7 @@ impl EdgeProvider for NameFamilies {
                 format!("{}/{}", index.name(parent), index.name(dir))
             };
             scratch.clear();
-            for child in index.children(dir) {
+            for child in index.child_ids(dir) {
                 if index.flags(child).is_dir() {
                     continue;
                 }

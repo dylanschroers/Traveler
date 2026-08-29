@@ -4,9 +4,19 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
-traveler-scan = { path = "../traveler-scan" }
+traveler-core = { path = "../traveler-core" }
 # Matches the version bevy 0.19 pins, so the app links one copy.
 glam = "0.32"
+# The CLI needs a tree to lay out and the library deliberately does not know how to make one.
+traveler-scan = { path = "../traveler-scan", optional = true }
+
+[features]
+default = ["cli"]
+cli = ["dep:traveler-scan"]
+
+# The property tests lay out a real scanned tree, and should not depend on a feature to do it.
+[dev-dependencies]
+traveler-scan = { path = "../traveler-scan" }
 
 [lib]
 name = "traveler_layout"
@@ -15,3 +25,4 @@ path = "src/lib.rs"
 [[bin]]
 name = "traveler-layout"
 path = "src/main.rs"
+required-features = ["cli"]
