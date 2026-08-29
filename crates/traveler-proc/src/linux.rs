@@ -13,12 +13,26 @@
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, Read};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{ChildStdout, Command, Stdio};
 use std::time::{Instant, SystemTime};
 
+use crate::pages::{PageBits, PageLimits, RawPages};
 use crate::{AddressSpace, Caps, CaptureMeta, Error, Result, maps};
+
+/// What one capture is allowed to cost the target.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CaptureOptions {
+    pub pages: PageLimits,
+    /// Skip the pagemap read entirely. The mapping level does not need it.
+    pub without_pages: bool,
+    /// Write `4` to `clear_refs`, so the *next* capture's soft-dirty bits mean "written since
+    /// this one". It costs the target: the kernel write-protects its page tables and the program
+    /// takes extra faults afterwards, which is why it is opt-in per capture and says so.
+    pub clear_soft_dirty: bool,
+}
 
 /// Cap on stop-and-enumerate rounds. A target spawning threads faster than they can be seized
 /// would otherwise spin here; the capture still happens and says it may be torn.
@@ -68,6 +82,9 @@ pub struct AttachedTarget {
     settled: bool,
     acquired: Instant,
     scratch: String,
+    /// Kept across captures so a repeated capture does not re-open it inside the stop.
+    pagemap: Option<File>,
+    words: Vec<u64>,
     stdout: Option<ChildStdout>,
 }
 
@@ -143,6 +160,8 @@ impl AttachedTarget {
             settled: true,
             acquired: Instant::now(),
             scratch: String::with_capacity(1 << 16),
+            pagemap: None,
+            words: Vec::new(),
             stdout,
         }
     }
@@ -170,17 +189,28 @@ impl AttachedTarget {
         std::path::Path::new(&format!("/proc/{}", self.pid)).exists()
     }
 
+    pub fn capture(&mut self) -> Result<AddressSpace> {
+        self.capture_with(&CaptureOptions::default())
+    }
+
     /// Reads the address space. Whether the target is running afterwards is exactly whether it
     /// was running before: a capture observes, it does not decide.
-    pub fn capture(&mut self) -> Result<AddressSpace> {
+    pub fn capture_with(&mut self, options: &CaptureOptions) -> Result<AddressSpace> {
         let was_running = !self.stopped;
         let started = Instant::now();
 
         self.freeze()?;
-        // Nothing is parsed while the target waits. Slurp, resume, then work on bytes we own.
-        let maps_path = format!("/proc/{}/maps", self.pid);
+        // Inside the window: raw reads and the one scan pagemap cannot do without. Everything
+        // else — full parsing, the tree, interning, layout — waits until the target is running.
         let mut text = std::mem::take(&mut self.scratch);
-        let read = slurp(&maps_path, &mut text);
+        let read = slurp(&format!("/proc/{}/maps", self.pid), &mut text);
+        let raw = match &read {
+            Ok(()) if !options.without_pages => self.read_pages(&maps::extents(&text), options),
+            _ => RawPages::default(),
+        };
+        if options.clear_soft_dirty {
+            let _ = std::fs::write(format!("/proc/{}/clear_refs", self.pid), b"4");
+        }
         let threads = 1 + self.helpers.len();
         let settled = self.settled;
 
@@ -191,11 +221,21 @@ impl AttachedTarget {
         let stop = started.elapsed();
         read?;
 
+        let pages = PageBits::decode(&raw);
+        let mut caps = Caps::BACKING_PATH;
+        if !options.without_pages {
+            caps |= Caps::PAGE_RESIDENCY | Caps::PAGE_SWAPPED;
+            if soft_dirty_works() {
+                caps |= Caps::SOFT_DIRTY | Caps::WRITE_TRACKING;
+            }
+        }
+
         let mappings = maps::parse(&text);
         let space = AddressSpace::single(
             &format!("{} [{}]", self.name, self.pid),
             &mappings,
-            Caps(Caps::BACKING_PATH),
+            pages,
+            Caps(caps),
             CaptureMeta {
                 pid: self.pid as u32,
                 wall: SystemTime::now(),
@@ -208,6 +248,31 @@ impl AttachedTarget {
         drop(mappings);
         self.scratch = text;
         Ok(space)
+    }
+
+    /// One `pread` per chosen mapping, into a buffer reused across captures.
+    fn read_pages(&mut self, extents: &[(u64, u64)], options: &CaptureOptions) -> RawPages {
+        let mut raw = RawPages::with_capacity(extents.len());
+        if self.pagemap.is_none() {
+            self.pagemap = File::open(format!("/proc/{}/pagemap", self.pid)).ok();
+        }
+        let Some(file) = &self.pagemap else {
+            return raw;
+        };
+        let fd = file.as_raw_fd();
+
+        let mut words = std::mem::take(&mut self.words);
+        for i in RawPages::plan(extents, &options.pages) {
+            let (start, end) = extents[i];
+            let count = ((end - start) / crate::pages::PAGE) as usize;
+            words.clear();
+            words.resize(count, 0);
+            if pread_words(fd, start / crate::pages::PAGE * 8, &mut words) {
+                raw.set(i, &words);
+            }
+        }
+        self.words = words;
+        raw
     }
 
     pub fn stop(&mut self) -> Result<()> {
@@ -354,6 +419,54 @@ fn wait_stop(pid: i32) -> Result<Stop> {
             return Ok(Stop::Killed(libc::WTERMSIG(status)));
         }
     }
+}
+
+/// `pread` until the buffer is full. A short read means the rest of the range has no page table,
+/// which is a fact about the target rather than an error.
+fn pread_words(fd: i32, offset: u64, words: &mut [u64]) -> bool {
+    let bytes = std::mem::size_of_val(words);
+    let base = words.as_mut_ptr().cast::<u8>();
+    let mut done = 0usize;
+    while done < bytes {
+        let n = unsafe {
+            libc::pread(
+                fd,
+                base.add(done).cast(),
+                bytes - done,
+                (offset + done as u64) as libc::off_t,
+            )
+        };
+        if n <= 0 {
+            return done == bytes;
+        }
+        done += n as usize;
+    }
+    true
+}
+
+/// Soft-dirty needs `CONFIG_MEM_SOFT_DIRTY`, and a kernel without it accepts the `clear_refs`
+/// write and then reports bit 55 as zero forever. The only honest test is to try it on ourselves:
+/// clear, write a page, and see whether the bit came back.
+fn soft_dirty_works() -> bool {
+    use std::sync::OnceLock;
+    static ANSWER: OnceLock<bool> = OnceLock::new();
+    *ANSWER.get_or_init(|| {
+        let mut probe = vec![0u8; crate::pages::PAGE as usize * 2];
+        let page = (probe.as_mut_ptr() as u64).next_multiple_of(crate::pages::PAGE);
+        unsafe { std::ptr::write_volatile(page as *mut u64, 1) };
+        if std::fs::write("/proc/self/clear_refs", b"4").is_err() {
+            return false;
+        }
+        unsafe { std::ptr::write_volatile(page as *mut u64, 2) };
+        let Ok(file) = File::open("/proc/self/pagemap") else {
+            return false;
+        };
+        let mut word = [0u64; 1];
+        if !pread_words(file.as_raw_fd(), page / crate::pages::PAGE * 8, &mut word) {
+            return false;
+        }
+        word[0] & (1 << 55) != 0
+    })
 }
 
 fn tgkill(tgid: i32, tid: i32, signal: i32) -> bool {

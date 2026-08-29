@@ -16,31 +16,58 @@ pub fn parse(text: &str) -> Vec<MappingFacts<'_>> {
     out
 }
 
-fn parse_line(line: &str) -> Option<MappingFacts<'_>> {
-    let (range, at) = field(line, 0)?;
-    let (perms, at) = field(line, at)?;
-    let (offset, at) = field(line, at)?;
-    let (dev, at) = field(line, at)?;
-    let (inode, at) = field(line, at)?;
+/// Just the address ranges, which is all the pagemap read needs to know.
+///
+/// §7 says nothing is parsed while the target is stopped, and this is the one exception the rule
+/// cannot avoid: pagemap is indexed by address, so the ranges have to be known before the read
+/// that the stop exists for. It is a scan of the first field of each line and nothing else, and it
+/// accepts exactly the lines [`parse`] accepts, so the two are index-aligned by construction.
+pub fn extents(text: &str) -> Vec<(u64, u64)> {
+    let mut out = Vec::with_capacity(text.len() / 80);
+    for line in text.lines() {
+        if let Some(range) = parse_range(line) {
+            out.push(range);
+        }
+    }
+    out
+}
 
+fn parse_range(line: &str) -> Option<(u64, u64)> {
+    let (range, _) = field(line, 0)?;
     let (start, end) = range.split_once('-')?;
     let start = u64::from_str_radix(start, 16).ok()?;
     let end = u64::from_str_radix(end, 16).ok()?;
-    if end < start {
-        return None;
-    }
+    (end >= start).then_some((start, end))
+}
 
-    let (major, minor) = dev.split_once(':')?;
-    let dev = (u64::from_str_radix(major, 16).ok()? << 32) | u64::from_str_radix(minor, 16).ok()?;
+/// A line is accepted on its range alone, so that [`extents`] and [`parse`] can never disagree
+/// about how many mappings there are. Real `maps` output never has a malformed tail; junk input
+/// gets defaults rather than shifting every index after it.
+fn parse_line(line: &str) -> Option<MappingFacts<'_>> {
+    let (start, end) = parse_range(line)?;
+
+    let mut at = field(line, 0).map_or(0, |(_, at)| at);
+    let mut next = || {
+        let (text, past) = field(line, at)?;
+        at = past;
+        Some(text)
+    };
+    let perms = next().unwrap_or("----");
+    let offset = next().and_then(|v| u64::from_str_radix(v, 16).ok());
+    let dev = next().and_then(|v| {
+        let (major, minor) = v.split_once(':')?;
+        Some((u64::from_str_radix(major, 16).ok()? << 32) | u64::from_str_radix(minor, 16).ok()?)
+    });
+    let inode = next().and_then(|v| v.parse().ok());
 
     Some(MappingFacts {
         addr: start,
         len: end - start,
         prot: Prot::parse(perms),
         path: line[at..].trim_start(),
-        offset: u64::from_str_radix(offset, 16).ok()?,
-        dev,
-        inode: inode.parse().ok()?,
+        offset: offset.unwrap_or(0),
+        dev: dev.unwrap_or(0),
+        inode: inode.unwrap_or(0),
     })
 }
 
@@ -121,5 +148,19 @@ ffffffffff600000-ffffffffff601000 --xp 00000000 00:00 0                  [vsysca
     #[test]
     fn junk_lines_are_dropped_rather_than_guessed_at() {
         assert!(parse("not a maps line\n\n").is_empty());
+        assert!(extents("not a maps line\n\n").is_empty());
+    }
+
+    /// The pagemap read indexes mappings by position, so a line the range scan keeps and the full
+    /// parse drops would silently shift every mapping after it.
+    #[test]
+    fn the_range_scan_and_the_full_parse_always_agree() {
+        let messy = format!("{SAMPLE}10000-11000 rubbish\nnonsense\n20000-21000 r--p\n");
+        let full = parse(&messy);
+        let ranges = extents(&messy);
+        assert_eq!(full.len(), ranges.len());
+        for (m, (start, end)) in full.iter().zip(ranges) {
+            assert_eq!((m.addr, m.addr + m.len), (start, end));
+        }
     }
 }

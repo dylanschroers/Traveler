@@ -5,15 +5,17 @@
 //! denominator, so a backend says what it can answer and callers degrade explicitly.
 
 pub mod maps;
+pub mod pages;
 mod space;
 
 #[cfg(target_os = "linux")]
 mod linux;
 
+pub use pages::{PageBits, PageLimits};
 pub use space::{Backing, Frame, MappingFacts, NodeKind, Prot};
 
 #[cfg(target_os = "linux")]
-pub use linux::{AttachedTarget, Launch};
+pub use linux::{AttachedTarget, CaptureOptions, Launch};
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -57,6 +59,12 @@ pub struct AddressSpace {
     frame: Arc<Frame>,
     present: Vec<bool>,
     prot: Vec<Prot>,
+    /// Page state per mapping, never per page as nodes. See §9.
+    pages: PageBits,
+    /// Resident bytes and unreadable bytes, rolled up so every level of the tree can answer.
+    /// Both are exactly additive, which is what lets a region report what its mappings hold.
+    resident: Vec<u64>,
+    unknown: Vec<u64>,
     caps: Caps,
     meta: CaptureMeta,
 }
@@ -67,6 +75,7 @@ impl AddressSpace {
     pub fn single(
         root_label: &str,
         mappings: &[MappingFacts<'_>],
+        pages: PageBits,
         caps: Caps,
         meta: CaptureMeta,
     ) -> Self {
@@ -85,13 +94,69 @@ impl AddressSpace {
             prot[parent].0 |= bits;
         }
 
+        let mut resident = vec![0u64; n];
+        let mut unknown = vec![0u64; n];
+        let first = frame.mappings().start as usize;
+        for (i, m) in mappings.iter().enumerate() {
+            if pages.is_elided(i) {
+                unknown[first + i] = m.len;
+            } else {
+                resident[first + i] = pages.resident(i) as u64 * pages::PAGE;
+            }
+        }
+        for id in (1..n).rev() {
+            let parent = frame.parent(NodeId(id as u32)).index();
+            resident[parent] += resident[id];
+            unknown[parent] += unknown[id];
+        }
+
         Self {
             frame: Arc::new(frame),
             present: vec![true; n],
             prot,
+            pages,
+            resident,
+            unknown,
             caps,
             meta,
         }
+    }
+
+    #[inline]
+    pub fn pages(&self) -> &PageBits {
+        &self.pages
+    }
+
+    /// Page state is parallel to the frame's mappings, not to its nodes, so a node that is not a
+    /// mapping has none.
+    #[inline]
+    pub fn mapping_index(&self, id: NodeId) -> Option<usize> {
+        let mappings = self.frame.mappings();
+        (mappings.start..mappings.end)
+            .contains(&id.0)
+            .then(|| (id.0 - mappings.start) as usize)
+    }
+
+    /// Resident bytes anywhere under `id`, and the bytes below it whose residency was never
+    /// read. Reported apart rather than summed, because "not read" is not "not resident".
+    #[inline]
+    pub fn resident_bytes(&self, id: NodeId) -> u64 {
+        self.resident[id.index()]
+    }
+
+    #[inline]
+    pub fn unknown_bytes(&self, id: NodeId) -> u64 {
+        self.unknown[id.index()]
+    }
+
+    /// `None` where nothing under `id` was read, rather than zero: a mapping whose pages were
+    /// never looked at is not a mapping with nothing resident.
+    pub fn resident_fraction(&self, id: NodeId) -> Option<f32> {
+        let known = self
+            .frame
+            .weight(id)
+            .checked_sub(self.unknown[id.index()])?;
+        (known > 0).then(|| self.resident[id.index()] as f32 / known as f32)
     }
 
     #[inline]

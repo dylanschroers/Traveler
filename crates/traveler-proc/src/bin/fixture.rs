@@ -18,11 +18,15 @@ fn main() {
     const CODE: usize = 8 * PAGE;
     const MARKER: u64 = 0x5445_4c45_5641_524d;
 
-    let threads: usize = std::env::args()
-        .nth(1)
-        .and_then(|a| a.strip_prefix("--threads=").map(str::to_owned))
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0);
+    let arg = |name: &str| -> Option<usize> {
+        std::env::args()
+            .filter_map(|a| a.strip_prefix(name).map(str::to_owned))
+            .find_map(|n| n.parse().ok())
+    };
+    let threads = arg("--threads=").unwrap_or(0);
+    // A sanitizer shadow is a twenty terabyte reservation. This is the small version of the thing
+    // the pagemap cap exists to survive.
+    let reserve_gib = arg("--reserve=").unwrap_or(0);
 
     // One reservation, then a window mprotected inside it. The three mappings that result are
     // adjacent and anonymous, so they must come back as one region with three children.
@@ -38,6 +42,20 @@ fn main() {
         );
     }
     let code = map(CODE, libc::PROT_READ | libc::PROT_EXEC);
+    let reserve = (reserve_gib > 0).then_some(reserve_gib << 30).map(|len| {
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_NONE,
+                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                -1,
+                0,
+            )
+        };
+        assert_ne!(p, libc::MAP_FAILED, "reservation failed");
+        (p as usize, len)
+    });
 
     let window = unsafe { arena.add(WINDOW_OFF) };
     unsafe {
@@ -51,6 +69,9 @@ fn main() {
     writeln!(out, "window {:x} {:x}", window as usize, WINDOW).unwrap();
     writeln!(out, "code {:x} {:x}", code as usize, CODE).unwrap();
     writeln!(out, "marker {MARKER:x}").unwrap();
+    if let Some((addr, len)) = reserve {
+        writeln!(out, "reserve {addr:x} {len:x}").unwrap();
+    }
 
     for _ in 0..threads {
         let target = window as usize;

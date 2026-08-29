@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 
 use traveler_core::{NodeId, Tree};
-use traveler_proc::{AddressSpace, AttachedTarget, Frame, Launch, NodeKind};
+use traveler_proc::{AddressSpace, AttachedTarget, Caps, CaptureOptions, Frame, Launch, NodeKind};
 
 struct Fixture {
     target: AttachedTarget,
@@ -18,11 +18,19 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// Launches the fixture, lets it build its mappings, and leaves it running and parked.
     fn start(threads: usize) -> Fixture {
+        let extra: Vec<String> = (threads > 0)
+            .then(|| format!("--threads={threads}"))
+            .into_iter()
+            .collect();
+        Fixture::start_with(&extra)
+    }
+
+    /// Launches the fixture, lets it build its mappings, and leaves it running and parked.
+    fn start_with(extra: &[String]) -> Fixture {
         let mut launch = Launch::new(env!("CARGO_BIN_EXE_traveler-fixture")).piped();
-        if threads > 0 {
-            launch = launch.arg(format!("--threads={threads}"));
+        for arg in extra {
+            launch = launch.arg(arg);
         }
         let mut target = AttachedTarget::launch(&launch).expect("launch the fixture");
         let stdout = target.take_stdout().expect("piped stdout");
@@ -276,4 +284,151 @@ fn attaching_to_a_process_we_did_not_launch_is_refused_with_a_reason() {
         Err(e) => e.to_string(),
     };
     assert!(text.contains('1'), "unhelpful message: {text}");
+}
+
+/// The fixture touches page 0 and page 2 of its window and nothing else, so residency is a fact
+/// with a known answer rather than a plausible-looking number.
+#[test]
+fn residency_matches_the_pages_the_fixture_actually_touched() {
+    let mut fx = Fixture::start(0);
+    let space = fx.target.capture().expect("capture");
+    assert!(space.caps().has(Caps::PAGE_RESIDENCY));
+
+    let (window, window_len) = fx.mark("window");
+    let id = mapping_covering(&space, window);
+    let m = space.mapping_index(id).expect("a mapping");
+    let pages = space.pages();
+
+    assert!(!pages.is_elided(m));
+    assert_eq!(pages.pages(m) as u64, window_len / 4096);
+    assert!(
+        pages.is_present(m, 0),
+        "page 0 was written and is not resident"
+    );
+    assert!(
+        pages.is_present(m, 2),
+        "page 2 was written and is not resident"
+    );
+    assert!(!pages.is_present(m, 1), "page 1 was never touched");
+    assert_eq!(pages.resident(m), 2);
+    assert_eq!(space.resident_bytes(id), 2 * 4096);
+
+    // The reservation around it was never touched at all.
+    let head = space.frame().parent(id);
+    let guard = space.frame().child_ids(head).next().expect("a guard");
+    assert_eq!(space.resident_bytes(guard), 0);
+}
+
+#[test]
+fn a_mapping_over_the_detail_cap_reports_nothing_rather_than_zero() {
+    let mut fx = Fixture::start(0);
+    let options = CaptureOptions {
+        pages: traveler_proc::PageLimits {
+            // Smaller than the fixture's own window, so it has to be elided.
+            detail_pages: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let space = fx.target.capture_with(&options).expect("capture");
+    let id = mapping_covering(&space, fx.mark("window").0);
+    assert_eq!(space.resident_fraction(id), None);
+    assert_eq!(space.unknown_bytes(id), space.frame().weight(id));
+    assert!(space.pages().is_elided(space.mapping_index(id).unwrap()));
+
+    // The region above it inherits the gap rather than reporting a confident zero.
+    let region = space.frame().parent(id);
+    assert!(space.unknown_bytes(region) >= space.frame().weight(id));
+}
+
+#[test]
+fn skipping_pages_clears_the_capability_rather_than_reporting_zeros() {
+    let mut fx = Fixture::start(0);
+    let options = CaptureOptions {
+        without_pages: true,
+        ..Default::default()
+    };
+    let space = fx.target.capture_with(&options).expect("capture");
+    assert!(!space.caps().has(Caps::PAGE_RESIDENCY));
+    let id = mapping_covering(&space, fx.mark("window").0);
+    assert_eq!(space.resident_fraction(id), None);
+    assert_eq!(space.resident_bytes(space.frame().root()), 0);
+}
+
+/// Soft-dirty is relative: clear at one capture, read at the next. The fixture's threads write to
+/// one page and nothing else, so exactly that page should come back dirty.
+#[test]
+fn soft_dirty_reports_what_was_written_between_two_captures() {
+    let mut fx = Fixture::start(1);
+    let cleared = fx
+        .target
+        .capture_with(&CaptureOptions {
+            clear_soft_dirty: true,
+            ..Default::default()
+        })
+        .expect("capture");
+    if !cleared.caps().has(Caps::SOFT_DIRTY) {
+        return; // CONFIG_MEM_SOFT_DIRTY is off, and the capability says so.
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let space = fx.target.capture().expect("capture");
+    let id = mapping_covering(&space, fx.mark("window").0);
+    let m = space.mapping_index(id).expect("a mapping");
+    let pages = space.pages();
+
+    // The spinning thread writes page 3, and only page 3.
+    assert!(pages.is_dirty(m, 3), "the written page is not marked dirty");
+    assert!(!pages.is_dirty(m, 1), "an untouched page came back dirty");
+}
+
+/// Residency has to roll up exactly, or a region reports a number its mappings do not add to.
+#[test]
+fn residency_sums_up_the_tree() {
+    let mut fx = Fixture::start(0);
+    let space = fx.target.capture().expect("capture");
+    let frame = space.frame();
+    for id in frame.nodes() {
+        if frame.child_count(id) == 0 {
+            continue;
+        }
+        let resident: u64 = frame.child_ids(id).map(|c| space.resident_bytes(c)).sum();
+        let unknown: u64 = frame.child_ids(id).map(|c| space.unknown_bytes(c)).sum();
+        assert_eq!(resident, space.resident_bytes(id));
+        assert_eq!(unknown, space.unknown_bytes(id));
+        assert!(space.resident_bytes(id) + space.unknown_bytes(id) <= frame.weight(id));
+    }
+}
+
+/// The cap §7 exists for. A reservation far larger than the working set must not be read, and the
+/// stop must stay bounded rather than scaling with the address space.
+#[test]
+fn a_huge_reservation_is_elided_and_the_stop_stays_bounded() {
+    let plain = Fixture::start(0);
+    let plain_stop = {
+        let mut fx = plain;
+        fx.target.capture().expect("capture").meta().stop
+    };
+
+    let mut fx = Fixture::start_with(&["--reserve=64".to_string()]);
+    let space = fx.target.capture().expect("capture");
+    let (reserve, reserve_len) = fx.mark("reserve");
+
+    let id = mapping_covering(&space, reserve);
+    assert_eq!(space.frame().weight(id), reserve_len);
+    assert_eq!(
+        space.resident_fraction(id),
+        None,
+        "a 64 GiB reservation was read rather than elided"
+    );
+    assert_eq!(space.unknown_bytes(id), reserve_len);
+
+    // Everything else still gets read, and the reservation costs nothing.
+    let window = mapping_covering(&space, fx.mark("window").0);
+    assert_eq!(space.resident_bytes(window), 2 * 4096);
+    assert!(
+        space.meta().stop < plain_stop * 4 + std::time::Duration::from_millis(20),
+        "stop grew with the address space: {:?} against {plain_stop:?}",
+        space.meta().stop
+    );
 }

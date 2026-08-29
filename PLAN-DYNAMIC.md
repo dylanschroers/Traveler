@@ -364,6 +364,12 @@ number to optimise, and it produces one non-negotiable rule:
 
 > **While stopped: read raw bytes only. Parse nothing. Resume, then parse.**
 
+With one exception the rule cannot avoid: `pagemap` is indexed by address, so the ranges have to
+be known before the read the stop exists for. What runs inside the window is a scan of the first
+field of each `maps` line and nothing else, and it accepts exactly the lines the full parser
+accepts, so the two can never disagree about how many mappings there are — which would silently
+shift every mapping after the disagreement. There is a test for that.
+
 Slurp `maps` into a `String` and the pagemap extents into a `Vec<u64>`, resume the target, and do
 all parsing, tree building, interning, and layout afterwards on data you already own. Parsing
 `maps` while the target waits is pure dead time and it is the easy mistake.
@@ -384,7 +390,7 @@ PLAN.md records everything else:
 | --- | --- |
 | seize all threads | < 5 ms |
 | read `maps` | ~1 ms |
-| read pagemap (1M *mapped* pages = 8 MB) | 10-25 ms |
+| read pagemap (1M *mapped* pages = 8 MB) | 60-140 ms, measured |
 | resume | < 1 ms |
 | **total stop** | **< 50 ms** |
 | parse + build + lay out, after resume | < 100 ms |
@@ -419,13 +425,41 @@ So the page read is capped twice, and both caps are visible rather than silent:
   its extent, permissions, label, sections and its place in the city, and sets `pages_elided`
   (§5), so the readout says "pages not read" rather than showing an empty plate. Start at 1 GiB,
   which is 2 MiB of pagemap for the widest mapping that still qualifies.
-- **Per capture.** Mappings are read **smallest first** until `page_budget_bytes` of pagemap is
-  spent, which maximises how many mappings get detail instead of letting one reservation eat the
-  window. Start at 8 MiB, the figure the table above is already measured against.
+- **Per capture.** Mappings are read **smallest first** until the budget is gone, which maximises
+  how many mappings get detail instead of letting one reservation eat the window.
 
 Raising either for one selected mapping is an explicit action on a key, exactly as the duplicate
-scan is: the cost is the user's to spend once they know what it buys. Both constants are starting
-points and **the real ones go in this file after measuring**, per §18.
+scan is: the cost is the user's to spend once they know what it buys.
+
+**Both caps are counted in pages, not in bytes of pagemap, because pages are what the read costs.**
+The kernel walks page tables to answer, so the price is per entry:
+
+| target | mappings | pages read | stop |
+| --- | ---: | ---: | ---: |
+| `gdb`, 51 MiB mapped | 283 | 13k | 4.5 ms |
+| `python3`, 1 GiB resident | 45 | 262k | 15-36 ms |
+| the same, 9 threads | 77 | 262k | 15-16 ms |
+
+Two things fall out of those numbers, and both changed the code:
+
+- **The estimate above was optimistic by about five times.** 262k pages cost 15-36 ms, so a
+  million would be 60-140 ms rather than 10-25, which is past the point §7 calls a red line. The
+  defaults are set from the measurement rather than from the estimate: **1<<19 pages of budget**
+  (2 GiB of address space, about 68 ms at the slow end) and **1<<20 pages of detail cap**.
+- **The spread on one target is transparent huge pages.** The same `python3` with the same
+  resident set costs 15 ms on one run and 36 ms on another; a 2 MiB huge page is one page-table
+  entry to walk instead of 512. It is not something to tune against, only to know about, and it is
+  the same THP the file used to claim was detectable (§6).
+
+There is also a per-mapping term: `gdb`'s 283 mappings cost 4.5 ms for only 13k pages, because
+each mapping is its own `pread`. Nothing needs doing about it yet — it is well inside the budget —
+but it is why the cost model is two terms and not one.
+
+**A first version of the cap was set at 1 GiB per mapping and was wrong in the interesting
+direction:** it elided the gigabyte heap, which is the mapping anyone would have opened the view
+to look at, while costing only 2 MiB of pagemap. A cap that excludes the subject is worse than no
+cap. The budget, taken smallest-first, is what actually bounds the stop; the detail cap only
+excludes reservations no budget could afford.
 
 ---
 

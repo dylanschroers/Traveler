@@ -126,10 +126,19 @@ fn report(space: &AddressSpace, n: usize, top: usize) {
             "   (TORN: the task list never settled)"
         }
     );
+    let ids = || frame.mappings().map(traveler_core::NodeId);
+    let root = frame.root();
+    let unread = space.unknown_bytes(root);
     println!(
-        "  {} nodes: {regions} regions, {mappings} mappings, {} mapped",
+        "  {} nodes: {regions} regions, {mappings} mappings, {} mapped, {} resident{}",
         frame.len(),
-        bytes(frame.weight(frame.root()))
+        bytes(frame.weight(root)),
+        bytes(space.resident_bytes(root)),
+        if unread == 0 {
+            String::new()
+        } else {
+            format!("   ({} unread)", bytes(unread))
+        }
     );
 
     let mut by_size: Vec<_> = frame
@@ -140,11 +149,15 @@ fn report(space: &AddressSpace, n: usize, top: usize) {
 
     for (size, id) in by_size.iter().take(top) {
         println!(
-            "  {:>10}  {:>4} {:016x}  {:<32} {}",
+            "  {:>10} {:>5}  {:>4} {:016x}  {:<28} {}",
             bytes(*size),
+            match space.resident_fraction(*id) {
+                Some(f) => format!("{:.0}%", f * 100.0),
+                None => "-".into(),
+            },
             space.prot(*id).to_string(),
             frame.addr(*id),
-            clip(frame.label(*id), 32),
+            clip(frame.label(*id), 28),
             match frame.backing(*id) {
                 Some((path, _)) => path,
                 None => "",
@@ -152,21 +165,15 @@ fn report(space: &AddressSpace, n: usize, top: usize) {
         );
     }
 
-    let exec: u64 = frame
-        .mappings()
-        .map(traveler_core::NodeId)
+    let exec: u64 = ids()
         .filter(|id| space.prot(*id).is_exec())
         .map(|id| frame.weight(id))
         .sum();
-    let writable: u64 = frame
-        .mappings()
-        .map(traveler_core::NodeId)
+    let writable: u64 = ids()
         .filter(|id| space.prot(*id).is_write())
         .map(|id| frame.weight(id))
         .sum();
-    let anonymous: u64 = frame
-        .mappings()
-        .map(traveler_core::NodeId)
+    let anonymous: u64 = ids()
         .filter(|id| frame.backing(*id).is_none())
         .map(|id| frame.weight(id))
         .sum();
