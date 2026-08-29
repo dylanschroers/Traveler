@@ -383,9 +383,10 @@ fn main() {
     .add_systems(
         Update,
         (
-            lod::update_lod::<Space>,
+            (lod::update_lod::<Space>, space::update_pages).chain(),
             space::update_stats,
             space::update_hover,
+            space::height_input,
             reset_camera_on_key::<Space>,
             (pin::pin_input, pin::update_pin::<Space>, space::paint_pin).chain(),
         )
@@ -605,8 +606,8 @@ fn pin_from_crosshair(hover: Res<Hover>, mut pinned: ResMut<Pinned>, mut done: L
     if *done {
         return;
     }
-    if let Some(node) = hover.node {
-        pinned.node = Some(node);
+    if let Some(target) = hover.target {
+        pinned.target = Some(target);
         *done = true;
     }
 }
@@ -864,7 +865,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn a_launch_lands_in_process_mode_with_an_address_space() {
-        use space::{Space, Target};
+        use space::{Space, Traced};
 
         let mut app = headless(Request::Launch {
             program: "/bin/sleep".into(),
@@ -880,7 +881,7 @@ mod tests {
         assert!(space.frame.mappings().len() > 3, "too few mappings");
         assert_eq!(space.frame.weight(space.frame.root()) % 4096, 0);
         assert!(space.placements.placed > 0);
-        assert!(app.world().resource::<Target>().0.is_alive());
+        assert!(app.world().resource::<Traced>().0.is_alive());
         // OnEnter(Process) ran for real, so every visible node has a block.
         let space = app.world().resource::<Space>();
         let missing = space

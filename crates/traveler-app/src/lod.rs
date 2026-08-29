@@ -20,7 +20,7 @@ use bevy::window::PrimaryWindow;
 use traveler_core::{NodeId, Tree};
 
 use crate::FileNode;
-use crate::scene::SceneView;
+use crate::scene::{SceneView, Target};
 
 /// Vertical field of view assumed for the screen-size test. Bevy's perspective default; being
 /// slightly off only nudges a heuristic threshold, it cannot make the view wrong.
@@ -66,13 +66,43 @@ impl Lod {
     pub fn mark_all_expanded(&mut self) {
         self.expanded.fill(true);
     }
+
+    /// Nodes the walk reached this frame, which is the visible set and therefore the only set
+    /// anything drawn below a leaf needs to consider.
+    #[inline]
+    pub fn reached(&self) -> &[u32] {
+        &self.reached
+    }
+
+    /// Pixels per world unit at one unit of distance, for a pass that has to repeat the
+    /// screen-size test on something the walk does not know about.
+    pub fn focal(viewport_height: f32) -> f32 {
+        viewport_height * 0.5 / (ASSUMED_FOV_Y * 0.5).tan()
+    }
 }
 
 #[derive(Resource, Default)]
 pub struct Hover {
-    pub node: Option<NodeId>,
+    pub target: Option<Target>,
     /// Distance to the hit, so a nearer pick from another source can win.
     pub distance: f32,
+}
+
+impl Hover {
+    #[inline]
+    pub fn node(&self) -> Option<NodeId> {
+        self.target.map(Target::node)
+    }
+
+    /// A later pass only wins if it is nearer, which is how the satellite cluster and the page
+    /// grid pick against the city underneath them.
+    pub fn nearer(&self) -> f32 {
+        if self.target.is_some() {
+            self.distance
+        } else {
+            f32::INFINITY
+        }
+    }
 }
 
 pub fn update_lod<S: SceneView>(
@@ -199,7 +229,7 @@ pub fn update_lod<S: SceneView>(
     }
 
     lod.drawn = lod.reached.len();
-    hover.node = best_node;
+    hover.target = best_node.map(Target::Node);
     hover.distance = best_hit;
 }
 

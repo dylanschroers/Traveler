@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use traveler_core::{NodeId, Tree};
 
 use crate::lod::Hover;
-use crate::scene::SceneView;
+use crate::scene::{SceneView, Target};
 
 /// Painting is one component write per node, so a click on the root cannot be allowed to touch
 /// every block in the tree at once. Counting is uncapped: the summary tells the truth even when
@@ -18,7 +18,7 @@ pub const MAX_PAINTED: usize = 20_000;
 
 #[derive(Resource, Default)]
 pub struct Pinned {
-    pub node: Option<NodeId>,
+    pub target: Option<Target>,
     /// Descendants of the pinned node, capped for painting.
     pub subtree: Vec<NodeId>,
     /// True totals underneath it, whatever the cap. A leaf is a file or a mapping, a group is a
@@ -40,14 +40,14 @@ pub fn pin_input(
     mut pinned: ResMut<Pinned>,
 ) {
     if keys.just_pressed(KeyCode::Escape) {
-        pinned.node = None;
+        pinned.target = None;
         return;
     }
     if !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     // Clicking the same block again, or clicking the sky, lets go.
-    pinned.node = match (hover.node, pinned.node) {
+    pinned.target = match (hover.target, pinned.target) {
         (Some(hit), Some(held)) if hit == held => None,
         (hit, _) => hit,
     };
@@ -57,12 +57,12 @@ pub fn pin_input(
 pub fn update_pin<S: SceneView>(
     mut pinned: ResMut<Pinned>,
     scene: Res<S>,
-    mut last: Local<Option<NodeId>>,
+    mut last: Local<Option<Target>>,
 ) {
-    if pinned.node == *last {
+    if pinned.target == *last {
         return;
     }
-    *last = pinned.node;
+    *last = pinned.target;
     pinned.generation = pinned.generation.wrapping_add(1);
 
     pinned.subtree.clear();
@@ -71,7 +71,7 @@ pub fn update_pin<S: SceneView>(
     pinned.biggest = None;
     pinned.painted_all = true;
 
-    let Some(root) = pinned.node else {
+    let Some(root) = pinned.target.map(Target::node) else {
         return;
     };
     let index = scene.tree();

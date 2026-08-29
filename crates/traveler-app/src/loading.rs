@@ -223,7 +223,7 @@ fn open_process(
     target: traveler_proc::AttachedTarget,
     capture: traveler_proc::AddressSpace,
 ) {
-    use crate::space::{Space, Target};
+    use crate::space::{Space, Traced};
 
     let meta = capture.meta();
     println!(
@@ -246,7 +246,7 @@ fn open_process(
     lod.px_threshold = session.lod_px;
 
     commands.insert_resource(space);
-    commands.insert_resource(Target(target));
+    commands.insert_resource(Traced(target));
     commands.insert_resource(lod);
     commands.insert_resource(Hover::default());
     commands.insert_resource(Pinned::default());

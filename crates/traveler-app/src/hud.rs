@@ -13,7 +13,7 @@ use crate::lod::{Hover, Lod};
 use crate::palette::{CATEGORY_COUNT, Category, top_extensions};
 use crate::pin::{MAX_PAINTED, Pinned};
 use crate::satellite::SatelliteView;
-use crate::scene::SceneView;
+use crate::scene::{SceneView, Target};
 use crate::{City, Mode};
 use traveler_scan::{Tree, human_bytes, thousands};
 
@@ -260,7 +260,7 @@ pub fn update_hover(
         return;
     };
     // A pin outranks the crosshair: holding onto something is the whole reason to click.
-    let shown = pinned.node.or(hover.node);
+    let shown = pinned.target.map(Target::node).or(hover.node());
     *vis = if shown.is_some() {
         Visibility::Inherited
     } else {
@@ -298,7 +298,7 @@ pub fn update_hover(
         kind
     );
 
-    if pinned.node == Some(id) {
+    if pinned.target == Some(Target::Node(id)) {
         out.push_str(
             "
 pinned   click again or esc to release",

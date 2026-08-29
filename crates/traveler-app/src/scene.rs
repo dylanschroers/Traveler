@@ -8,6 +8,30 @@ use bevy::prelude::*;
 use traveler_core::{NodeId, Tree};
 use traveler_layout::Placements;
 
+/// What the crosshair can be on. Pages are not nodes — a gigabyte of working set is 262k of them
+/// and §9 keeps them as bitsets — so they have no `NodeId` and everything that can hold a
+/// selection has to be able to hold one of these instead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Target {
+    Node(NodeId),
+    /// Page `page` of `mapping`, resolved against that mapping's bitsets on demand.
+    Page {
+        mapping: NodeId,
+        page: u32,
+    },
+}
+
+impl Target {
+    /// The node a selection belongs to, which for a page is the mapping holding it.
+    #[inline]
+    pub fn node(self) -> NodeId {
+        match self {
+            Target::Node(id) => id,
+            Target::Page { mapping, .. } => mapping,
+        }
+    }
+}
+
 pub trait SceneView: Resource {
     type Tree: Tree;
 

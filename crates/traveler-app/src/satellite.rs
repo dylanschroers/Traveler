@@ -15,6 +15,7 @@ use traveler_scan::NodeId;
 
 use crate::edges::{Edges, HIGHLIGHT};
 use crate::lod::Hover;
+use crate::scene::Target;
 use crate::{City, Mode, ray_box};
 
 /// Pool size, and therefore the hard cap on blocks the cluster can show.
@@ -149,11 +150,7 @@ pub fn pick_satellite(
     let dir = *cam.forward();
     let size = Vec3::splat(view.block);
 
-    let mut best = if hover.node.is_some() {
-        hover.distance
-    } else {
-        f32::INFINITY
-    };
+    let mut best = hover.nearer();
     let mut hit = None;
     for (slot, offset) in view.data.offsets.iter().enumerate() {
         if let Some(t) = ray_box(eye, dir, view.origin + *offset * view.scale, size)
@@ -166,7 +163,7 @@ pub fn pick_satellite(
     if let Some(slot) = hit
         && let Some(member) = view.member(slot)
     {
-        hover.node = Some(member);
+        hover.target = Some(Target::Node(member));
         hover.distance = best;
     }
 }
