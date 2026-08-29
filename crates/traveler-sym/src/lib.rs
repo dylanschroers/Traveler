@@ -62,6 +62,9 @@ pub struct Image {
     /// Lowest loadable address in the link view. A load bias is where the image actually starts
     /// minus this, which is 0 for a non-relocatable image and the mapping base for a PIE.
     pub base_vaddr: u64,
+    /// Where execution starts, in the link view. For an executable this is `_start`, which is the
+    /// one place a breakpoint can be put before any of the program's own code has run.
+    pub entry: u64,
 }
 
 impl Image {
@@ -73,12 +76,10 @@ impl Image {
     pub fn from_bytes(data: &[u8]) -> Result<Image, String> {
         let file = object::File::parse(data).map_err(|e| e.to_string())?;
 
-        let base_vaddr = file
-            .segments()
-            .map(|s| s.address())
-            .filter(|a| *a > 0)
-            .min()
-            .unwrap_or(0);
+        // Zero is not "no address": a position-independent image's first loadable segment is at
+        // zero, and excluding it makes every load bias too small by the size of that segment.
+        // Found by a breakpoint computed from this landing in the dynamic linker's string data.
+        let base_vaddr = file.segments().map(|s| s.address()).min().unwrap_or(0);
 
         let mut text = String::new();
         let mut sections: Vec<Section> = Vec::new();
@@ -121,6 +122,7 @@ impl Image {
             symbols,
             text,
             base_vaddr,
+            entry: file.entry(),
         })
     }
 

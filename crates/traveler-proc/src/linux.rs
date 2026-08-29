@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::process::{ChildStdout, Command, Stdio};
 use std::time::{Instant, SystemTime};
 
+use crate::control::{Breakpoints, Frame, StopReason, TRAP};
 use crate::pages::{PageBits, PageLimits, RawPages};
 use crate::{AddressSpace, Caps, CaptureMeta, Error, Result, SectionSource, maps};
 
@@ -79,6 +80,12 @@ pub struct AttachedTarget {
     pending: i32,
     /// Launched targets are ours to clean up; attached ones are left running.
     launched: bool,
+    /// Phase 9's patch table. Empty unless something asked for a breakpoint, and nothing in the
+    /// capture path reads it.
+    breaks: Breakpoints,
+    /// A breakpoint the program counter is sitting on, which has to be stepped over before it can
+    /// be put back or the target traps on it immediately.
+    resting_on: Option<u64>,
     settled: bool,
     acquired: Instant,
     scratch: String,
@@ -160,6 +167,8 @@ impl AttachedTarget {
             stopped: true,
             pending: 0,
             launched: false,
+            breaks: Breakpoints::default(),
+            resting_on: None,
             settled: true,
             acquired: Instant::now(),
             scratch: String::with_capacity(1 << 16),
@@ -371,6 +380,221 @@ impl AttachedTarget {
             done += n as usize;
         }
         Ok(done)
+    }
+
+    pub fn breakpoints(&self) -> &Breakpoints {
+        &self.breaks
+    }
+
+    /// Patches one byte to `0xCC`, keeping what was there.
+    pub fn set_breakpoint(&mut self, addr: u64) -> Result<()> {
+        if self.breaks.at(addr).is_some() {
+            return Ok(());
+        }
+        let was_running = !self.stopped;
+        self.freeze()?;
+
+        let mut original = [0u8; 1];
+        let result = self
+            .read_mem(addr, &mut original)
+            .and_then(|n| match n {
+                1 => self.write_at(addr, &[TRAP]).map(|_| original[0]),
+                _ => Err(Error::Io(io::Error::from(io::ErrorKind::InvalidInput))),
+            })
+            .inspect(|byte| self.breaks.insert(addr, *byte));
+
+        self.release_helpers();
+        if was_running {
+            self.thaw()?;
+        }
+        result.map(|_| ())
+    }
+
+    pub fn clear_breakpoint(&mut self, addr: u64) -> Result<()> {
+        let Some(found) = self.breaks.take(addr) else {
+            return Ok(());
+        };
+        let was_running = !self.stopped;
+        self.freeze()?;
+        let result = self.write_at(addr, &[found.original]);
+        self.release_helpers();
+        if was_running {
+            self.thaw()?;
+        }
+        result.map(|_| ())
+    }
+
+    /// Resumes and waits for whatever stops it next.
+    ///
+    /// The dance around a breakpoint the program counter is already on is the whole reason this
+    /// cannot be `PTRACE_CONT` alone: the trap has to come out, one instruction has to run, and
+    /// the trap has to go back, or the target either traps forever or misses it on every later
+    /// pass.
+    pub fn resume_until(&mut self) -> Result<StopReason> {
+        // A running target cannot be continued: `PTRACE_CONT` needs a ptrace-stop, and asking a
+        // moving process to resume is `ESRCH`. Stopping first is invisible and is what a debugger
+        // does anyway.
+        self.freeze()?;
+        self.release_helpers();
+
+        if let Some(addr) = self.resting_on.take()
+            && let Some(found) = self.breaks.at(addr).copied()
+        {
+            self.write_at(addr, &[found.original])?;
+            self.step_raw()?;
+            self.write_at(addr, &[TRAP])?;
+        }
+        self.stopped = false;
+        let signal = std::mem::take(&mut self.pending);
+        self.cont(libc::PTRACE_CONT, signal)?;
+        self.wait_reason()
+    }
+
+    /// One instruction.
+    pub fn step(&mut self) -> Result<StopReason> {
+        self.freeze()?;
+        self.release_helpers();
+        if let Some(addr) = self.resting_on.take()
+            && let Some(found) = self.breaks.at(addr).copied()
+        {
+            self.write_at(addr, &[found.original])?;
+            let reason = self.step_raw();
+            self.write_at(addr, &[TRAP])?;
+            reason?;
+            return Ok(StopReason::Step);
+        }
+        self.step_raw()?;
+        Ok(StopReason::Step)
+    }
+
+    fn step_raw(&mut self) -> Result<()> {
+        self.cont(libc::PTRACE_SINGLESTEP, 0)?;
+        match wait_stop(self.pid)? {
+            Stop::Stopped(_) => Ok(()),
+            other => Err(gone(self.pid, other)),
+        }
+    }
+
+    fn cont(&mut self, request: libc::c_uint, signal: i32) -> Result<()> {
+        if unsafe { libc::ptrace(request, self.pid, 0, signal as libc::c_long) } == -1 {
+            return Err(Error::Ptrace {
+                call: "PTRACE_CONT",
+                pid: self.pid,
+                source: io::Error::last_os_error(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Classifies a stop, and rewinds the program counter off a trap it just executed.
+    fn wait_reason(&mut self) -> Result<StopReason> {
+        let reason = match wait_stop(self.pid)? {
+            Stop::Exited(code) => return Ok(StopReason::Exited(code)),
+            Stop::Killed(signal) => return Ok(StopReason::Killed(signal)),
+            Stop::Stopped(libc::SIGTRAP) => {
+                self.stopped = true;
+                let pc = self.program_counter()?;
+                // The trap has already run, so the counter is one past it.
+                match self.breaks.at(pc.wrapping_sub(1)).map(|b| b.addr) {
+                    Some(addr) => {
+                        self.set_program_counter(addr)?;
+                        self.resting_on = Some(addr);
+                        StopReason::Breakpoint(addr)
+                    }
+                    None => StopReason::Step,
+                }
+            }
+            Stop::Stopped(signal) => {
+                self.stopped = true;
+                self.pending = signal;
+                StopReason::Signal(signal)
+            }
+        };
+        Ok(reason)
+    }
+
+    pub fn program_counter(&self) -> Result<u64> {
+        Ok(self.registers()?.rip)
+    }
+
+    fn set_program_counter(&mut self, pc: u64) -> Result<()> {
+        let mut regs = self.registers()?;
+        regs.rip = pc;
+        let mut iov = libc::iovec {
+            iov_base: (&raw mut regs).cast(),
+            iov_len: size_of::<libc::user_regs_struct>(),
+        };
+        if unsafe {
+            libc::ptrace(
+                libc::PTRACE_SETREGSET,
+                self.pid,
+                libc::NT_PRSTATUS,
+                &mut iov,
+            )
+        } == -1
+        {
+            return Err(Error::Ptrace {
+                call: "PTRACE_SETREGSET",
+                pid: self.pid,
+                source: io::Error::last_os_error(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn registers(&self) -> Result<libc::user_regs_struct> {
+        let mut regs: libc::user_regs_struct = unsafe { std::mem::zeroed() };
+        let mut iov = libc::iovec {
+            iov_base: (&raw mut regs).cast(),
+            iov_len: size_of::<libc::user_regs_struct>(),
+        };
+        if unsafe {
+            libc::ptrace(
+                libc::PTRACE_GETREGSET,
+                self.pid,
+                libc::NT_PRSTATUS,
+                &mut iov,
+            )
+        } == -1
+        {
+            return Err(Error::Ptrace {
+                call: "PTRACE_GETREGSET",
+                pid: self.pid,
+                source: io::Error::last_os_error(),
+            });
+        }
+        Ok(regs)
+    }
+
+    /// Walks the frame-pointer chain.
+    ///
+    /// Honest about what it is: this needs frame pointers, and code built without them unwinds to
+    /// one frame and stops. Doing better means reading `.eh_frame` CFI, which is a real subsystem
+    /// and not one this phase claims to have.
+    pub fn backtrace(&self, limit: usize) -> Result<Vec<Frame>> {
+        let regs = self.registers()?;
+        let mut out = vec![Frame {
+            pc: regs.rip,
+            frame: regs.rbp,
+        }];
+        let mut frame = regs.rbp;
+        for _ in 1..limit {
+            if frame == 0 || frame % 8 != 0 {
+                break;
+            }
+            let mut pair = [0u8; 16];
+            if self.read_mem(frame, &mut pair).unwrap_or(0) != 16 {
+                break;
+            }
+            let next = u64::from_ne_bytes(pair[..8].try_into().expect("eight bytes"));
+            let pc = u64::from_ne_bytes(pair[8..].try_into().expect("eight bytes"));
+            if pc == 0 || next <= frame {
+                break;
+            }
+            out.push(Frame { pc, frame: next });
+            frame = next;
+        }
+        Ok(out)
     }
 
     /// Ptrace is per-thread: seizing the leader stops one thread while the others keep mutating

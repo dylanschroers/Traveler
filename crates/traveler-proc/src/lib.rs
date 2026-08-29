@@ -4,6 +4,7 @@
 //! everything downstream of it is platform-neutral. Capability flags rather than a lowest common
 //! denominator, so a backend says what it can answer and callers degrade explicitly.
 
+mod control;
 pub mod maps;
 pub mod pages;
 pub mod pointers;
@@ -15,6 +16,7 @@ mod linux;
 #[cfg(target_os = "windows")]
 mod windows;
 
+pub use control::{Breakpoint, Breakpoints, Frame as StackFrame, StopReason, TRAP};
 pub use pages::{PageBits, PageLimits};
 pub use pointers::{MemoryReader, PointerEdge, Pointers, ScanLimits};
 pub use space::{

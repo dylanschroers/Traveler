@@ -7,6 +7,19 @@
 #[cfg(not(target_os = "linux"))]
 fn main() {}
 
+/// Somewhere to put a breakpoint. `#[used]` on a reference to it for the same reason the symbol
+/// tests need one: nothing outside a binary can call it, so without one it is internalised.
+#[cfg(target_os = "linux")]
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn traveler_fixture_tick(n: u64) -> u64 {
+    std::hint::black_box(n).wrapping_add(1)
+}
+
+#[cfg(target_os = "linux")]
+#[used]
+static KEEP_TICK: extern "C" fn(u64) -> u64 = traveler_fixture_tick;
+
 #[cfg(target_os = "linux")]
 fn main() {
     use std::io::Write;
@@ -96,11 +109,20 @@ fn main() {
         });
     }
 
+    writeln!(
+        out,
+        "tick {:x}",
+        traveler_fixture_tick as *const () as usize
+    )
+    .unwrap();
     writeln!(out, "ready {threads}").unwrap();
     out.flush().unwrap();
 
+    let mut n = 0u64;
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        // Called in the park loop so a breakpoint on it is hit reliably rather than raced for.
+        n = traveler_fixture_tick(n);
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
 }
 

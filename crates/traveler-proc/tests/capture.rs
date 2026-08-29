@@ -563,3 +563,119 @@ fn the_pointer_scan_stops_when_its_budget_runs_out() {
     );
     assert!(found.bytes_read <= 8192);
 }
+
+/// Phase 9's core, and the test of whether §12's seam was in the right place: breakpoints,
+/// stepping and unwinding all sit on `AttachedTarget` and none of them touch the capture path.
+mod control {
+    use super::Fixture;
+    use traveler_core::Tree;
+    use traveler_proc::StopReason;
+
+    #[test]
+    fn a_breakpoint_stops_the_target_on_the_instruction_it_patched() {
+        let mut fx = Fixture::start(0);
+        let (tick, _) = fx.mark("tick");
+
+        fx.target.set_breakpoint(tick).expect("set");
+        assert_eq!(fx.target.breakpoints().len(), 1);
+
+        let reason = fx.target.resume_until().expect("resume");
+        assert_eq!(reason, StopReason::Breakpoint(tick));
+        // The counter is rewound onto the instruction, not left one past the trap.
+        assert_eq!(fx.target.program_counter().expect("pc"), tick);
+        assert!(fx.target.is_stopped());
+    }
+
+    /// The dance around a breakpoint the counter is already on: without it the target either
+    /// traps forever on the same instruction or misses it on every later pass.
+    #[test]
+    fn a_breakpoint_is_hit_again_after_resuming_off_it() {
+        let mut fx = Fixture::start(0);
+        let (tick, _) = fx.mark("tick");
+        fx.target.set_breakpoint(tick).expect("set");
+
+        for round in 0..3 {
+            let reason = fx.target.resume_until().expect("resume");
+            assert_eq!(reason, StopReason::Breakpoint(tick), "round {round}");
+        }
+    }
+
+    #[test]
+    fn clearing_a_breakpoint_puts_the_original_instruction_back() {
+        let mut fx = Fixture::start(0);
+        let (tick, _) = fx.mark("tick");
+
+        let mut before = [0u8; 1];
+        fx.target.read_mem(tick, &mut before).expect("read");
+
+        fx.target.set_breakpoint(tick).expect("set");
+        let mut patched = [0u8; 1];
+        fx.target.read_mem(tick, &mut patched).expect("read");
+        assert_eq!(patched[0], traveler_proc::TRAP);
+
+        fx.target.clear_breakpoint(tick).expect("clear");
+        let mut after = [0u8; 1];
+        fx.target.read_mem(tick, &mut after).expect("read");
+        assert_eq!(after, before);
+        assert!(fx.target.breakpoints().is_empty());
+    }
+
+    #[test]
+    fn stepping_advances_exactly_one_instruction() {
+        let mut fx = Fixture::start(0);
+        let (tick, _) = fx.mark("tick");
+        fx.target.set_breakpoint(tick).expect("set");
+        assert_eq!(
+            fx.target.resume_until().expect("resume"),
+            StopReason::Breakpoint(tick)
+        );
+
+        let before = fx.target.program_counter().expect("pc");
+        assert_eq!(fx.target.step().expect("step"), StopReason::Step);
+        let after = fx.target.program_counter().expect("pc");
+        assert_ne!(after, before, "the counter did not move");
+        // One instruction, not a jump across the program.
+        assert!(after.abs_diff(before) < 64, "{before:#x} to {after:#x}");
+    }
+
+    /// Unwinding, and what it honestly is.
+    ///
+    /// The innermost frame is always the stop. Whether there is a caller above it depends on the
+    /// target keeping frame pointers, which Rust and most optimised C do not, so the test asserts
+    /// the walk is *sound* — it terminates, and every frame is above the one it came from —
+    /// rather than that it is complete. Completeness needs `.eh_frame` CFI, which this phase does
+    /// not claim to have.
+    #[test]
+    fn a_backtrace_at_a_breakpoint_is_sound_even_where_it_is_not_complete() {
+        let mut fx = Fixture::start(0);
+        let (tick, _) = fx.mark("tick");
+        fx.target.set_breakpoint(tick).expect("set");
+        fx.target.resume_until().expect("resume");
+
+        let frames = fx.target.backtrace(16).expect("backtrace");
+        assert_eq!(frames[0].pc, tick, "the innermost frame is not the stop");
+        assert!(frames.len() <= 16, "the walk did not terminate");
+        // Stacks grow down, so each frame is above the one it was found from. A chain that walked
+        // backwards would loop, which is the failure mode a bad unwinder actually has.
+        assert!(frames.windows(2).all(|w| w[1].frame > w[0].frame));
+    }
+
+    /// §12's actual claim: none of this changes the capture path. A target with breakpoints set
+    /// still captures, and what it captures is not the patched byte.
+    #[test]
+    fn breakpoints_do_not_reach_the_capture_path() {
+        let mut fx = Fixture::start(0);
+        let (tick, _) = fx.mark("tick");
+        let before = fx.target.capture().expect("capture");
+
+        fx.target.set_breakpoint(tick).expect("set");
+        fx.target.resume_until().expect("resume");
+
+        let after = fx.target.capture().expect("capture");
+        assert_eq!(after.frame().len(), before.frame().len());
+        assert_eq!(
+            after.frame().weight(after.frame().root()),
+            before.frame().weight(before.frame().root())
+        );
+    }
+}

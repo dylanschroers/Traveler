@@ -15,6 +15,7 @@ use traveler_proc::{
     AddressSpace, AttachedTarget, Change, Frame, NodeKind, Prot, Union, pages::PAGE,
 };
 
+use crate::control::Control;
 use crate::hud::{INK_MUTED, INK_SECONDARY, PANEL, font, panel};
 use crate::lod::{Hover, Lod};
 use crate::palette::Category;
@@ -256,6 +257,7 @@ pub fn spawn(
     commands.insert_resource(pages);
     commands.init_resource::<Poke>();
     commands.init_resource::<Scan>();
+    commands.init_resource::<Control>();
 
     stage(&mut commands, &mut space, &cube, &block);
     commands.insert_resource(BlockMesh(cube));
@@ -539,8 +541,8 @@ pub fn setup_hud(
             "WASD move   space/ctrl up-down   shift run   scroll speed   right-click or M grab mouse\n\
              L level of detail   [ ] detail threshold   H height channel   R reset camera\n\
              C new capture   , . step captures   X diff the last two\n\
-             left click pins   P writes bytes at the pin   G scans for pointers\n\
-             fly close to a mapping to see its pages",
+             left click pins   P writes bytes   B breakpoint   N continue\n\
+             G scans for pointers   fly close to a mapping to see its pages",
         ),
         font(12.0),
         TextColor(INK_MUTED),
@@ -722,6 +724,8 @@ pub fn update_stats(
     pages: Res<PageView>,
     captures: Res<Captures>,
     scan: Res<Scan>,
+    control: Res<Control>,
+    traced: Res<Traced>,
     time: Res<Time<Real>>,
     mut smoothed: Local<f32>,
     mut stats: Query<&mut Text, With<SpaceStats>>,
@@ -755,6 +759,11 @@ pub fn update_stats(
         );
         text.0.push('\n');
         text.0.push_str(&scan.summary());
+        text.0.push('\n');
+        text.0.push_str(&control.summary(&traced));
+        for frame in control.frames.iter().take(6) {
+            text.0.push_str(&format!("\n  {frame}"));
+        }
     }
 }
 
@@ -791,6 +800,7 @@ pub fn close(mut commands: Commands) {
     commands.remove_resource::<PageView>();
     commands.remove_resource::<Poke>();
     commands.remove_resource::<Scan>();
+    commands.remove_resource::<Control>();
     commands.remove_resource::<Captures>();
     commands.remove_resource::<Traced>();
     commands.remove_resource::<Lod>();

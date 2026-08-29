@@ -180,9 +180,11 @@ Why launch is first, concretely:
   execution control, which §1 otherwise defers to phase 9. Without one, capture 1 lands wherever
   the user presses the key: the libraries have still arrived, but it is not a clean before and
   after. The cheap version is a single `0xCC` at `e_entry`, taken from the header `traveler-sym`
-  already parses in 6g, hit once and removed — about fifty lines, one `waitpid` return to
-  classify, and no state machine. **Schedule it at the end of 6h**, because the diff of those two
-  frames is the picture the launch path exists to produce and it should not wait for phase 9.
+  already parses in 6g, hit once and removed. **It arrived with phase 9** rather than at the end
+  of 6h, which is where it was always going to be cheapest: four lines on top of a breakpoint that
+  had to exist anyway. Launching now takes capture 0 at the `execve` stop and capture 1 at the
+  entry point, and a test asserts `libc` is absent from the first and present in the second — the
+  dynamic linker's work, as a picture.
 - **Write tracking needs that zero point.** Soft-dirty (§6) is a *relative* measurement: you
   clear at A and read at B. Attach late and the first capture has no baseline.
 - **Reproducibility.** Launching owns argv, env, and cwd, and can disable ASLR
@@ -724,6 +726,21 @@ read, write, and the thread list. Breakpoints add: an instruction-patch table (`
 a stop-reason enum on resume, single-step, and stack unwinding. None of that changes the capture,
 layout, or render path — which is the test of whether this seam is in the right place.
 
+**It was in the right place.** Phase 9 added all of that and touched nothing else, and there is a
+test that captures a target with breakpoints set and asserts the snapshot is identical. Three
+things the sketch did not say:
+
+- **Resuming is not `PTRACE_CONT`.** A target sitting *on* a breakpoint has to have the trap
+  lifted, one instruction stepped, and the trap put back, or it either traps forever on the same
+  instruction or misses it on every later pass.
+- **A running target cannot be continued.** `PTRACE_CONT` needs a ptrace-stop and is `ESRCH`
+  otherwise, so "run to the next stop" begins by stopping.
+- **Unwinding is frame pointers, and that is not enough.** The walk is sound — it terminates, and
+  every frame is above the one it came from — but Rust and optimised C omit frame pointers, so it
+  often finds only the innermost frame. Completeness needs `.eh_frame` CFI, which is a real
+  subsystem this phase does not claim. The test asserts soundness rather than completeness, which
+  is the difference between a check and a wish.
+
 ---
 
 ## 13. The pointer graph — phase 7
@@ -843,11 +860,11 @@ rather than the implementation.
 | ~~**6e**~~ | Pages | **Done.** pagemap under caps counted in pages (§7), bitsets, `Target` threaded through hover/pin/HUD and the extra branch on the detail pass (§9), pooled page blocks, soft-dirty opt-in, resident fraction on the thickness channel. Stop time measured, and the cost model rewritten because of it. |
 | ~~**6f**~~ | Windows backend | **Written and compile-checked, not run.** `VirtualQueryEx`, `QueryWorkingSetEx`, Toolhelp32 suspend, `GetMappedFileNameW` with the DOS-path conversion. Cross-checked with `cargo check --target x86_64-pc-windows-msvc`, which is what proves the abstraction; runtime correctness needs a Windows machine and is unverified. |
 | ~~**6g**~~ | `traveler-sym` tiers 1-2 | **Done.** Sections as a third level with gaps filling what they do not cover, `.dynsym` names on the crosshair, images parsed once and keyed by path and mtime, the tier stated in the HUD. `gdb` goes from 361 nodes to 892. |
-| ~~**6h**~~ | Capture and diff | **Done, less the breakpoint.** Multiple captures on a key, boundary-split union frame, the diverging encoding measured against the same floors as the categorical hues (§10), the view named in the HUD. The single-shot entry-point breakpoint from §4 is **not** built: without it capture 0 is where the user pressed the key rather than the `execve` stop, so the linking diff is available from `--run` only by taking a capture immediately. |
+| ~~**6h**~~ | Capture and diff | **Done.** Multiple captures on a key, boundary-split union frame, the diverging encoding measured against the same floors as the categorical hues (§10), the view named in the HUD. The entry-point breakpoint it was waiting on landed in phase 9, so a launch opens with the `execve` stop and the entry point already captured. |
 | ~~**6i**~~ | Poke | **Done.** Untyped writes at a stop, on both backends. `P` on a pinned node or page, with the width said out loud and a value too wide for its type refused rather than truncated. |
 | ~~**7**~~ | Pointer graph | **Done.** Worker thread, aggregated mapping-to-mapping edges, drill-down within a selection. Only resident pages are read, so the scan does not fault in the working set it is measuring. |
 | ~~**8**~~ | Tier 3 symbols | **Done for DWARF, less locals.** Line numbers, typed globals, separate debug files by build-id, typed pokes, the tier stated in the HUD. Locals need a register context and a frame base, which is phase 9. PDB is unwritten: it needs a Windows machine to be worth writing against, and §16 already says everything measured here is Linux. |
-| **9** | Full debugger control | Breakpoints, stepping, watchpoints, unwinding, behind the existing `AttachedTarget` seam. **Not built.** It is the phase that needs the execution-control state machine §1 defers, and the single-shot entry breakpoint from §4 is its smallest useful piece. |
+| ~~**9**~~ | Full debugger control | **Done, less watchpoints.** Breakpoints, stepping, registers, a frame-pointer backtrace and the stop-reason enum, all on `AttachedTarget`. §12's prediction held: a test captures a target with breakpoints set and asserts the snapshot is identical. Watchpoints need the x86 debug registers and are unwritten; unwinding is frame-pointer based, which is sound but incomplete. |
 
 **On 6f's position:** "abstracted from day one" means the trait and the snapshot struct are
 designed against *both* capability lists from 6c (which §6 above does), not that both backends are

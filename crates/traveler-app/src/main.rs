@@ -4,6 +4,7 @@
 //! thread, and a `Mode` state machine gates every system so nothing touches a session that does
 //! not exist yet.
 
+mod control;
 mod edges;
 mod hud;
 mod launcher;
@@ -392,6 +393,7 @@ fn main() {
             space::update_hover,
             space::height_input,
             poke::input,
+            control::input,
             pointers::input,
             pointers::poll,
             pointers::draw,
@@ -888,6 +890,30 @@ mod tests {
 
         let space = app.world().resource::<Space>();
         assert!(space.frame.mappings().len() > 3, "too few mappings");
+        // A launch brings two captures: the `execve` stop and the entry point. Their difference is
+        // the dynamic linker's work, which §4 says is the picture the launch path exists for.
+        let captures = app.world().resource::<space::Captures>();
+        assert_eq!(captures.0.len(), 2, "no before-and-after of the linker");
+        let (before, after) = (&captures.0[0], &captures.0[1]);
+        assert!(
+            after.frame().mappings().len() > before.frame().mappings().len(),
+            "nothing arrived between the execve stop and the entry point"
+        );
+        let names = |c: &traveler_proc::AddressSpace| -> Vec<String> {
+            let frame = c.frame();
+            frame
+                .nodes()
+                .map(|id| frame.label(id).to_string())
+                .collect()
+        };
+        assert!(
+            !names(before).iter().any(|n| n.starts_with("libc.so")),
+            "libc was already mapped at the execve stop"
+        );
+        assert!(
+            names(after).iter().any(|n| n.starts_with("libc.so")),
+            "libc had not arrived by the entry point"
+        );
         assert_eq!(space.frame.weight(space.frame.root()) % 4096, 0);
         assert!(space.placements.placed > 0);
         assert!(app.world().resource::<Traced>().0.is_alive());

@@ -224,3 +224,17 @@ mod tier3 {
         assert!(DebugInfo::parse(Path::new("/nonexistent")).is_none());
     }
 }
+
+/// A load bias is `where it landed - base_vaddr`, so a base_vaddr that skips a
+/// position-independent image's first segment shifts every section and every symbol by that
+/// segment's size. It is not visible in the link view at all, which is why it needs its own test.
+#[test]
+fn a_position_independent_image_reports_a_base_of_zero() {
+    let image = elf();
+    assert_eq!(
+        image.base_vaddr, 0,
+        "the fixture is position-independent, so its lowest loadable segment is at zero"
+    );
+    // And the entry point is inside it rather than below it.
+    assert!(image.entry >= image.base_vaddr);
+}

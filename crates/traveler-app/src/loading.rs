@@ -188,8 +188,43 @@ enum Opened {
 #[cfg(target_os = "linux")]
 struct ProcessSession {
     target: traveler_proc::AttachedTarget,
-    capture: traveler_proc::AddressSpace,
+    /// Oldest first. A launch brings two: the `execve` stop and the entry point, whose difference
+    /// is the dynamic linker's work.
+    captures: Vec<traveler_proc::AddressSpace>,
     symbols: crate::symbols::Symbols,
+}
+
+/// Runs a launched target from its `execve` stop to its entry point, so capture 1 is taken at a
+/// place rather than at whenever the loop got round to it.
+///
+/// §4 called this "about fifty lines and no state machine" and scheduled it at the end of 6h; it
+/// arrived with phase 9's breakpoints instead, which is where it was always going to be cheapest.
+#[cfg(target_os = "linux")]
+fn run_to_entry(target: &mut traveler_proc::AttachedTarget) -> Result<(), String> {
+    use traveler_proc::StopReason;
+
+    let exe =
+        std::fs::read_link(format!("/proc/{}/exe", target.pid())).map_err(|e| e.to_string())?;
+    let image = traveler_sym::Image::parse(&exe)?;
+    // At the `execve` stop the executable is mapped and nothing else has moved, so the bias is
+    // whatever the loader put it at minus where it was linked.
+    let text = std::fs::read_to_string(format!("/proc/{}/maps", target.pid()))
+        .map_err(|e| e.to_string())?;
+    let base = traveler_proc::maps::parse(&text)
+        .iter()
+        .filter(|m| m.path == exe.to_string_lossy())
+        .map(|m| m.addr.saturating_sub(m.offset))
+        .min()
+        .ok_or("the executable is not mapped")?;
+
+    let entry = base.saturating_sub(image.base_vaddr) + image.entry;
+    target.set_breakpoint(entry).map_err(|e| e.to_string())?;
+    let reason = target.resume_until().map_err(|e| e.to_string())?;
+    target.clear_breakpoint(entry).map_err(|e| e.to_string())?;
+    match reason {
+        StopReason::Breakpoint(at) if at == entry => Ok(()),
+        other => Err(format!("stopped at {other:?} instead of the entry point")),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -197,6 +232,7 @@ fn acquire(request: &Request) -> Result<Opened, String> {
     use crate::symbols::Symbols;
     use traveler_proc::{AttachedTarget, CaptureOptions, Launch};
 
+    let launched = matches!(request, Request::Launch { .. });
     let mut target = match request {
         Request::Launch {
             program,
@@ -208,11 +244,7 @@ fn acquire(request: &Request) -> Result<Opened, String> {
                 launch = launch.arg(arg);
             }
             launch.disable_aslr = *no_aslr;
-            let mut target = AttachedTarget::launch(&launch).map_err(|e| e.to_string())?;
-            // The `execve` stop is capture 0's frame, but on its own it is four mappings. Let the
-            // linker run so the first thing on screen is a process rather than a stub.
-            target.resume().map_err(|e| e.to_string())?;
-            target
+            AttachedTarget::launch(&launch).map_err(|e| e.to_string())?
         }
         Request::Attach(pid) => AttachedTarget::attach(*pid).map_err(|e| e.to_string())?,
         Request::Disk(_) => unreachable!("a disk request is a scan"),
@@ -220,14 +252,33 @@ fn acquire(request: &Request) -> Result<Opened, String> {
     // Tier 2 rides along with the capture: the images are parsed after the target is resumed,
     // and if none of them parse the view is tier 1 and still complete.
     let mut symbols = Symbols::default();
-    let space = target
-        .capture_sections(&CaptureOptions::default(), &mut |mappings| {
-            symbols.build(mappings)
-        })
-        .map_err(|e| e.to_string())?;
+    let mut take = |target: &mut AttachedTarget| {
+        target
+            .capture_sections(&CaptureOptions::default(), &mut |mappings| {
+                symbols.build(mappings)
+            })
+            .map_err(|e| e.to_string())
+    };
+
+    let mut captures = Vec::new();
+    if launched {
+        // §4's frame, and the whole reason launch comes first: the address space before the
+        // dynamic linker has run. On its own it is four mappings; against the next one it is the
+        // linking, drawn.
+        captures.push(take(&mut target)?);
+        if let Err(e) = run_to_entry(&mut target) {
+            eprintln!(
+                "note: could not stop at the entry point ({e}), so capture 1 is wherever \
+                       the target had got to"
+            );
+        }
+    }
+    captures.push(take(&mut target)?);
+    target.resume().map_err(|e| e.to_string())?;
+
     Ok(Opened::Process(Box::new(ProcessSession {
         target,
-        capture: space,
+        captures,
         symbols,
     })))
 }
@@ -243,9 +294,11 @@ fn open_process(commands: &mut Commands, session: &Session, opened: ProcessSessi
 
     let ProcessSession {
         target,
-        capture,
+        captures,
         symbols,
     } = opened;
+    let capture = captures.last().expect("at least one capture").clone();
+    let shown = captures.len() - 1;
 
     let meta = capture.meta();
     println!(
@@ -259,7 +312,7 @@ fn open_process(commands: &mut Commands, session: &Session, opened: ProcessSessi
 
     let space = Space::build(
         Source::Capture(Box::new(capture.clone())),
-        View::Capture(0),
+        View::Capture(shown),
         session.space,
     );
     println!(
@@ -279,7 +332,7 @@ fn open_process(commands: &mut Commands, session: &Session, opened: ProcessSessi
     );
 
     commands.insert_resource(space);
-    commands.insert_resource(Captures(vec![capture]));
+    commands.insert_resource(Captures(captures));
     commands.insert_resource(Traced(target));
     commands.insert_resource(symbols);
     commands.insert_resource(lod);
