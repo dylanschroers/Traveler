@@ -4,9 +4,10 @@
 //! slot polled each frame, which is the pattern `edges::DupeState` already uses; nothing here
 //! blocks a frame.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bevy::prelude::*;
 use bevy::state::state_scoped::DespawnOnExit;
@@ -27,19 +28,34 @@ use crate::{BlockMaterials, City, Mode, Session};
 #[derive(Resource, Clone, Debug)]
 pub enum Request {
     Disk(PathBuf),
+    Launch {
+        program: OsString,
+        args: Vec<OsString>,
+        no_aslr: bool,
+    },
+    Attach(u32),
 }
 
-enum Loaded {
-    Disk(FileIndex),
-}
-
-type Outcome = Result<Loaded, String>;
+/// How long a launched target runs before the first capture, so the view opens on a linked
+/// process rather than on the four mappings that exist at the `execve` stop. The `execve` frame is
+/// the more interesting one, but only next to a later one, which is 6h's job.
+const SETTLE: Duration = Duration::from_millis(250);
 
 #[derive(Resource)]
 pub struct Loading {
-    slot: Arc<Mutex<Option<Outcome>>>,
+    job: Job,
     started: Instant,
     label: String,
+}
+
+enum Job {
+    /// A walk takes seconds, so it goes to a worker and drops its answer in a slot.
+    Scan(Arc<Mutex<Option<Result<FileIndex, String>>>>),
+    /// A capture does not. ptrace attaches a tracee to exactly one tracer *thread* — requests
+    /// from any other thread are `ESRCH` — so acquisition and every later capture happen on the
+    /// main thread. At half a millisecond a stop costs a fraction of a frame; if 6e's pagemap
+    /// read changes that, the fix is a thread that owns the target, not a worker per capture.
+    Acquire { request: Request, ready_at: Instant },
 }
 
 #[derive(Component)]
@@ -52,24 +68,32 @@ pub fn begin(mut commands: Commands, request: Option<Res<Request>>) {
     let request = request.clone();
     let label = match &request {
         Request::Disk(path) => format!("scanning {}", path.display()),
+        Request::Launch { program, .. } => format!("launching {}", program.display()),
+        Request::Attach(pid) => format!("attaching to {pid}"),
     };
     println!("{label} ...");
 
-    let slot: Arc<Mutex<Option<Outcome>>> = Arc::new(Mutex::new(None));
-    let sink = slot.clone();
-    std::thread::spawn(move || {
-        let outcome = match request {
-            Request::Disk(path) => scan(&path, &ScanOptions::default())
-                .map(Loaded::Disk)
-                .map_err(|e| format!("cannot scan {}: {e}", path.display())),
-        };
-        if let Ok(mut guard) = sink.lock() {
-            *guard = Some(outcome);
+    let job = match request {
+        Request::Disk(path) => {
+            let slot = Arc::new(Mutex::new(None));
+            let sink: Arc<Mutex<Option<Result<FileIndex, String>>>> = slot.clone();
+            std::thread::spawn(move || {
+                let outcome = scan(&path, &ScanOptions::default())
+                    .map_err(|e| format!("cannot scan {}: {e}", path.display()));
+                if let Ok(mut guard) = sink.lock() {
+                    *guard = Some(outcome);
+                }
+            });
+            Job::Scan(slot)
         }
-    });
+        request => Job::Acquire {
+            ready_at: Instant::now() + SETTLE,
+            request,
+        },
+    };
 
     commands.insert_resource(Loading {
-        slot,
+        job,
         started: Instant::now(),
         label,
     });
@@ -121,15 +145,29 @@ pub fn poll(
         next.set(Mode::Launcher);
         return;
     };
-    let Some(outcome) = loading.slot.lock().ok().and_then(|mut g| g.take()) else {
-        return;
+
+    let outcome = match &loading.job {
+        Job::Scan(slot) => match slot.lock().ok().and_then(|mut g| g.take()) {
+            Some(result) => result.map(Opened::Disk),
+            None => return,
+        },
+        Job::Acquire { request, ready_at } => {
+            if Instant::now() < *ready_at {
+                return;
+            }
+            acquire(request)
+        }
     };
     commands.remove_resource::<Loading>();
 
     match outcome {
-        Ok(Loaded::Disk(index)) => {
+        Ok(Opened::Disk(index)) => {
             open_disk(&mut commands, &session, index);
             next.set(Mode::Disk);
+        }
+        Ok(Opened::Process(target, space)) => {
+            open_process(&mut commands, &session, target, space);
+            next.set(Mode::Process);
         }
         Err(message) => {
             eprintln!("error: {message}");
@@ -137,6 +175,81 @@ pub fn poll(
             next.set(Mode::Launcher);
         }
     }
+}
+
+enum Opened {
+    Disk(FileIndex),
+    #[cfg(target_os = "linux")]
+    Process(traveler_proc::AttachedTarget, traveler_proc::AddressSpace),
+}
+
+#[cfg(target_os = "linux")]
+fn acquire(request: &Request) -> Result<Opened, String> {
+    use traveler_proc::{AttachedTarget, Launch};
+
+    let mut target = match request {
+        Request::Launch {
+            program,
+            args,
+            no_aslr,
+        } => {
+            let mut launch = Launch::new(program);
+            for arg in args {
+                launch = launch.arg(arg);
+            }
+            launch.disable_aslr = *no_aslr;
+            let mut target = AttachedTarget::launch(&launch).map_err(|e| e.to_string())?;
+            // The `execve` stop is capture 0's frame, but on its own it is four mappings. Let the
+            // linker run so the first thing on screen is a process rather than a stub.
+            target.resume().map_err(|e| e.to_string())?;
+            target
+        }
+        Request::Attach(pid) => AttachedTarget::attach(*pid).map_err(|e| e.to_string())?,
+        Request::Disk(_) => unreachable!("a disk request is a scan"),
+    };
+    let space = target.capture().map_err(|e| e.to_string())?;
+    Ok(Opened::Process(target, space))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn acquire(_: &Request) -> Result<Opened, String> {
+    Err("looking inside a process is Linux-only so far".into())
+}
+
+#[cfg(target_os = "linux")]
+fn open_process(
+    commands: &mut Commands,
+    session: &Session,
+    target: traveler_proc::AttachedTarget,
+    capture: traveler_proc::AddressSpace,
+) {
+    use crate::space::{Space, Target};
+
+    let meta = capture.meta();
+    println!(
+        "  {} in {} regions, {} mappings   stop {:.2} ms over {} threads",
+        human_bytes(capture.frame().weight(capture.frame().root())),
+        capture.frame().child_count(capture.frame().root()),
+        capture.frame().mappings().len(),
+        meta.stop.as_secs_f64() * 1000.0,
+        meta.threads,
+    );
+
+    let space = Space::new(capture, session.space);
+    println!(
+        "  laid out {} blocks in {:.0} ms",
+        space.placements.placed, space.layout_ms
+    );
+
+    let mut lod = Lod::new(space.frame.len());
+    lod.enabled = session.lod;
+    lod.px_threshold = session.lod_px;
+
+    commands.insert_resource(space);
+    commands.insert_resource(Target(target));
+    commands.insert_resource(lod);
+    commands.insert_resource(Hover::default());
+    commands.insert_resource(Pinned::default());
 }
 
 fn open_disk(commands: &mut Commands, session: &Session, index: FileIndex) {
@@ -204,7 +317,7 @@ fn open_disk(commands: &mut Commands, session: &Session, index: FileIndex) {
 }
 
 /// Everything a disk session owns. Its entities carry `DespawnOnExit`, so only the resources are
-/// left to drop.
+/// left to drop. The process session's teardown lives beside its own module, in `space::close`.
 pub fn close_disk(mut commands: Commands) {
     commands.remove_resource::<City>();
     commands.remove_resource::<Lod>();

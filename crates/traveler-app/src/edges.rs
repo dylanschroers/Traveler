@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use bevy::prelude::*;
+use traveler_core::NodeId;
 use traveler_edges::{EdgeProvider, EdgeSet, ExactDuplicates};
-use traveler_scan::NodeId;
 
 use crate::palette::Category;
 use crate::pin::Pinned;
@@ -107,7 +107,11 @@ pub fn edge_input(keys: Res<ButtonInput<KeyCode>>, mut edges: ResMut<Edges>, cit
 
     let count = edges.active_set().map(|s| s.groups.len()).unwrap_or(0);
     if count > 0 {
-        let step = if keys.pressed(KeyCode::ShiftLeft) { 10 } else { 1 };
+        let step = if keys.pressed(KeyCode::ShiftLeft) {
+            10
+        } else {
+            1
+        };
         if keys.just_pressed(KeyCode::ArrowDown) {
             edges.selected = Some(match edges.selected {
                 Some(i) => (i + step).min(count - 1),
@@ -166,7 +170,7 @@ pub fn paint_selection(
     for id in previous {
         let cat = category_of(&city, id);
         if let Ok(mut mat) = blocks.get_mut(city.entities[id.index()]) {
-            *mat = MeshMaterial3d(materials.by_category[cat as usize].clone());
+            *mat = MeshMaterial3d(materials.by_slot[cat as usize].clone());
         }
     }
 
@@ -178,9 +182,11 @@ pub fn paint_selection(
         }
     };
 
-    if let Some(group) = edges.sets.get(edges.active).and_then(|s| {
-        edges.selected.and_then(|i| s.groups.get(i))
-    }) {
+    if let Some(group) = edges
+        .sets
+        .get(edges.active)
+        .and_then(|s| edges.selected.and_then(|i| s.groups.get(i)))
+    {
         for id in group.members.iter().take(MAX_HIGHLIGHT) {
             paint(*id, &materials.highlight, &mut painted);
         }

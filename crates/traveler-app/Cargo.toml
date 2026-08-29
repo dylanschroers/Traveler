@@ -4,7 +4,9 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+traveler-core = { path = "../traveler-core" }
 traveler-scan = { path = "../traveler-scan" }
+traveler-proc = { path = "../traveler-proc" }
 traveler-layout = { path = "../traveler-layout" }
 traveler-edges = { path = "../traveler-edges" }
 bevy = { version = "0.19", features = ["free_camera"] }

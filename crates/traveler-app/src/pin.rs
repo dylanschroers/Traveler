@@ -6,10 +6,10 @@
 //! rather than to its neighbours.
 
 use bevy::prelude::*;
-use traveler_scan::{NodeId, Tree};
+use traveler_core::{NodeId, Tree};
 
-use crate::City;
 use crate::lod::Hover;
+use crate::scene::SceneView;
 
 /// Painting is one component write per node, so a click on the root cannot be allowed to touch
 /// every block in the tree at once. Counting is uncapped: the summary tells the truth even when
@@ -21,9 +21,10 @@ pub struct Pinned {
     pub node: Option<NodeId>,
     /// Descendants of the pinned node, capped for painting.
     pub subtree: Vec<NodeId>,
-    /// True totals underneath it, whatever the cap.
-    pub files: u64,
-    pub dirs: u64,
+    /// True totals underneath it, whatever the cap. A leaf is a file or a mapping, a group is a
+    /// folder or a region, depending on which city is being looked at.
+    pub leaves: u64,
+    pub groups: u64,
     pub painted_all: bool,
     /// Bumped whenever the subtree is rebuilt. The painter keys off this rather than off the node
     /// id, so it cannot mark itself up to date after running before the subtree existed.
@@ -53,7 +54,11 @@ pub fn pin_input(
 }
 
 /// Recomputes the subtree and its totals, only when the pinned node changes.
-pub fn update_pin(mut pinned: ResMut<Pinned>, city: Res<City>, mut last: Local<Option<NodeId>>) {
+pub fn update_pin<S: SceneView>(
+    mut pinned: ResMut<Pinned>,
+    scene: Res<S>,
+    mut last: Local<Option<NodeId>>,
+) {
     if pinned.node == *last {
         return;
     }
@@ -61,26 +66,26 @@ pub fn update_pin(mut pinned: ResMut<Pinned>, city: Res<City>, mut last: Local<O
     pinned.generation = pinned.generation.wrapping_add(1);
 
     pinned.subtree.clear();
-    pinned.files = 0;
-    pinned.dirs = 0;
+    pinned.leaves = 0;
+    pinned.groups = 0;
     pinned.biggest = None;
     pinned.painted_all = true;
 
     let Some(root) = pinned.node else {
         return;
     };
-    let index = &city.index;
+    let index = scene.tree();
 
-    pinned.biggest = index.child_ids(root).max_by_key(|c| index.size(*c));
+    pinned.biggest = index.child_ids(root).max_by_key(|c| index.weight(*c));
 
     // Children are contiguous but grandchildren are not, so the subtree needs a walk.
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         if id != root {
-            if index.flags(id).is_dir() {
-                pinned.dirs += 1;
+            if index.is_group(id) {
+                pinned.groups += 1;
             } else {
-                pinned.files += 1;
+                pinned.leaves += 1;
             }
         }
         if pinned.subtree.len() < MAX_PAINTED {

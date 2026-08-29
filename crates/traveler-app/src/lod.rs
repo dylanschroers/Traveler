@@ -17,9 +17,10 @@
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use traveler_scan::{NodeId, Tree};
+use traveler_core::{NodeId, Tree};
 
-use crate::{City, FileNode};
+use crate::FileNode;
+use crate::scene::SceneView;
 
 /// Vertical field of view assumed for the screen-size test. Bevy's perspective default; being
 /// slightly off only nudges a heuristic threshold, it cannot make the view wrong.
@@ -74,8 +75,8 @@ pub struct Hover {
     pub distance: f32,
 }
 
-pub fn update_lod(
-    city: Res<City>,
+pub fn update_lod<S: SceneView>(
+    scene: Res<S>,
     mut lod: ResMut<Lod>,
     mut hover: ResMut<Hover>,
     camera: Query<&GlobalTransform, With<Camera3d>>,
@@ -95,8 +96,9 @@ pub fn update_lod(
     // Pixels per world unit at one unit of distance.
     let focal = viewport_h * 0.5 / (ASSUMED_FOV_Y * 0.5).tan();
 
-    let index = &city.index;
-    let places = &city.placements;
+    let index = scene.tree();
+    let places = scene.placements();
+    let entities = scene.entities();
 
     lod.frame = lod.frame.wrapping_add(1);
     let frame = lod.frame;
@@ -139,7 +141,7 @@ pub fn update_lod(
         // Box actually drawn for this node: the thin slab when its contents are showing,
         // otherwise a solid block spanning everything it contains.
         let (draw_center, draw_size) = if kids > 0 && !expand {
-            collapsed_box(&city, id)
+            collapsed_box(&*scene, id)
         } else {
             (center, size)
         };
@@ -159,7 +161,7 @@ pub fn update_lod(
         let idx = raw as usize;
         if lod.seen_stamp[idx] != frame && lod.visible[idx] {
             lod.visible[idx] = false;
-            if let Ok((mut vis, _)) = blocks.get_mut(city.entities[idx]) {
+            if let Ok((mut vis, _)) = blocks.get_mut(entities[idx]) {
                 *vis = Visibility::Hidden;
             }
         }
@@ -177,7 +179,7 @@ pub fn update_lod(
         if !show && !reshape {
             continue;
         }
-        let Ok((mut vis, mut transform)) = blocks.get_mut(city.entities[idx]) else {
+        let Ok((mut vis, mut transform)) = blocks.get_mut(entities[idx]) else {
             continue;
         };
         if show {
@@ -189,7 +191,7 @@ pub fn update_lod(
             let (c, s) = if want_expanded {
                 (places.center[idx], places.size[idx])
             } else {
-                collapsed_box(&city, id)
+                collapsed_box(&*scene, id)
             };
             transform.translation = c;
             transform.scale = s;
@@ -203,11 +205,11 @@ pub fn update_lod(
 
 /// A folder standing in for its contents: same footprint, but tall enough to cover everything
 /// inside it, so an unexpanded region reads as solid mass rather than an empty plate.
-fn collapsed_box(city: &City, id: NodeId) -> (Vec3, Vec3) {
-    let center = city.placements.center[id.index()];
-    let size = city.placements.size[id.index()];
+fn collapsed_box<S: SceneView>(scene: &S, id: NodeId) -> (Vec3, Vec3) {
+    let center = scene.placements().center[id.index()];
+    let size = scene.placements().size[id.index()];
     let base = center.y - size.y * 0.5;
-    let top = city.subtree_top[id.index()].max(base + size.y);
+    let top = scene.subtree_top()[id.index()].max(base + size.y);
     let height = top - base;
     (
         Vec3::new(center.x, base + height * 0.5, center.z),

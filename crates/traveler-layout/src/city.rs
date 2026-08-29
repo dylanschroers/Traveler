@@ -11,7 +11,7 @@
 use glam::Vec3;
 use traveler_core::{NodeId, Tree};
 
-use crate::{Layout, LayoutCtx, Placements, Rect, layout_weights};
+use crate::{Layout, LayoutCtx, Placements, Rect, layout_weights, spacing_ratio};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeightMode {
@@ -173,7 +173,14 @@ impl Layout for CityLayout {
             // Children pack into the parent's rect minus its wall, which leaves the slab showing
             // as a border.
             let depth = index.depth(id);
-            let inner = rect.inset(spacing_ratio(p, p.margin_ratio, depth) * rect.w.min(rect.h));
+            let inner = rect.inset(
+                spacing_ratio(
+                    p.margin_ratio,
+                    p.spacing_falloff,
+                    p.min_spacing_ratio,
+                    depth,
+                ) * rect.w.min(rect.h),
+            );
             if inner.is_degenerate() {
                 continue;
             }
@@ -207,7 +214,9 @@ impl Layout for CityLayout {
             squarify(&items, inner, &mut placed_rects);
 
             // One street width for the whole folder, so the gaps line up.
-            let street = spacing_ratio(p, p.gap_ratio, depth) * inner.w.min(inner.h) * 0.5;
+            let street = spacing_ratio(p.gap_ratio, p.spacing_falloff, p.min_spacing_ratio, depth)
+                * inner.w.min(inner.h)
+                * 0.5;
             for (child, r) in placed_rects.iter() {
                 let inset = street.min(p.max_child_inset * r.w.min(r.h));
                 stack.push((*child, r.inset(inset)));
@@ -230,15 +239,6 @@ impl CityLayout {
             }
         }
     }
-}
-
-/// Spacing as a fraction of the parent's shorter side, shrinking one step per level of depth.
-#[inline]
-fn spacing_ratio(p: &CityParams, base: f64, depth: u16) -> f64 {
-    if base <= 0.0 {
-        return 0.0;
-    }
-    (base * p.spacing_falloff.powi(depth as i32)).max(p.min_spacing_ratio)
 }
 
 /// The squarify step. `items` must be sorted by area descending and sum to `rect.area()`.

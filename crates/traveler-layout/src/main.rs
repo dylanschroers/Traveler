@@ -4,14 +4,19 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use traveler_layout::{
-    CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements,
+    CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements, SpaceLayout, SpaceParams,
     svg::{self, SvgParams},
 };
 use traveler_scan::{ExtId, ScanOptions, Tree, scan};
 
 const USAGE: &str = "\
-usage: traveler-layout <path> [options]
+usage: traveler-layout <path> [options]          the disk city
+       traveler-layout [options] --run <cmd>     a process address space
 
+  --run <cmd>     capture a launched process and lay out its address space.
+                  Takes the rest of the line, so options come before it.
+  --wait MS       let the target run this long before capturing (default 400)
+  --no-aslr       launch with ADDR_NO_RANDOMIZE, so two runs are comparable
   --svg <file>    write a top-down SVG of the footprint
   --px N          SVG size in pixels (default 1400)
   --world N       side length of the root footprint in world units (default 1000)
@@ -25,10 +30,28 @@ fn main() -> ExitCode {
     let mut params = CityParams::default();
     let mut svg_params = SvgParams::default();
 
+    let mut run: Vec<String> = Vec::new();
+    let mut wait_ms = 400u64;
+    let mut no_aslr = false;
+
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
+            "--run" => {
+                run = raw[i + 1..].to_vec();
+                if run.is_empty() {
+                    return usage("--run needs a command");
+                }
+                i = raw.len();
+            }
+            "--wait" => {
+                i += 1;
+                match raw.get(i).and_then(|v| v.parse().ok()) {
+                    Some(ms) => wait_ms = ms,
+                    None => return usage("--wait needs milliseconds"),
+                }
+            }
             "--svg" => {
                 i += 1;
                 match raw.get(i) {
@@ -60,6 +83,7 @@ fn main() -> ExitCode {
                     None => return usage("--spacing needs a number"),
                 }
             }
+            "--no-aslr" => no_aslr = true,
             "--uniform" => params.height = HeightMode::Uniform,
             "--raw" => {
                 params.margin_ratio = 0.0;
@@ -70,6 +94,10 @@ fn main() -> ExitCode {
             other => path = Some(PathBuf::from(other)),
         }
         i += 1;
+    }
+
+    if !run.is_empty() {
+        return process(&run, wait_ms, no_aslr, svg_out, &svg_params);
     }
 
     let Some(path) = path else {
@@ -226,6 +254,107 @@ fn main() -> ExitCode {
     println!();
 
     ExitCode::SUCCESS
+}
+
+/// The address space, laid out and measured. §8 of PLAN-DYNAMIC says the strip treemap's aspect
+/// ratios have to be measured on a real target rather than assumed, and this is what measures them.
+#[cfg(target_os = "linux")]
+fn process(
+    argv: &[String],
+    wait_ms: u64,
+    no_aslr: bool,
+    svg_out: Option<PathBuf>,
+    svg_params: &SvgParams,
+) -> ExitCode {
+    use traveler_proc::{AttachedTarget, Launch};
+
+    let mut launch = Launch::new(&argv[0]);
+    for extra in &argv[1..] {
+        launch = launch.arg(extra);
+    }
+    launch.disable_aslr = no_aslr;
+    let mut target = match AttachedTarget::launch(&launch) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("error: cannot launch: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = target.resume() {
+        eprintln!("error: cannot resume: {e}");
+        return ExitCode::FAILURE;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+    let space = match target.capture() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let frame = space.frame();
+    let mut placements = Placements::with_capacity(frame.len());
+    let started = std::time::Instant::now();
+    SpaceLayout::new(SpaceParams::default()).place(&LayoutCtx::new(frame.as_ref()), &mut placements);
+    let elapsed = started.elapsed();
+
+    println!("\n{} [{}]", target.name(), target.pid());
+    println!(
+        "  {} nodes, {} placed, {} collapsed",
+        frame.len(),
+        placements.placed,
+        frame.len() - placements.placed
+    );
+    println!(
+        "  layout in {:.2} ms   {} mapped",
+        elapsed.as_secs_f64() * 1000.0,
+        traveler_core::human_bytes(frame.weight(frame.root()))
+    );
+
+    let a = svg::aspect_stats(frame.as_ref(), &placements);
+    println!(
+        "  mapping aspect ratio over {} tiles: median {:.2}  p90 {:.2}  p99 {:.2}  worst {:.1}",
+        a.count, a.median, a.p90, a.p99, a.worst
+    );
+    println!(
+        "  hairlines worse than 50:1: {} ({:.3}% of tiles)",
+        a.slivers,
+        a.slivers as f64 / a.count.max(1) as f64 * 100.0
+    );
+
+    if let Some(out) = svg_out {
+        let doc = svg::render(frame.as_ref(), &placements, svg_params, |id| {
+            permission_color(space.prot(id))
+        });
+        if let Err(e) = std::fs::write(&out, doc.as_bytes()) {
+            eprintln!("error: cannot write {}: {e}", out.display());
+            return ExitCode::FAILURE;
+        }
+        println!("\n  wrote {}", out.display());
+    }
+    println!();
+    ExitCode::SUCCESS
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process(_: &[String], _: u64, _: bool, _: Option<PathBuf>, _: &SvgParams) -> ExitCode {
+    eprintln!("error: capturing a process is Linux-only so far");
+    ExitCode::FAILURE
+}
+
+/// The validated three hues from PLAN.md §5, mapped onto permissions.
+#[cfg(target_os = "linux")]
+fn permission_color(prot: traveler_proc::Prot) -> [u8; 3] {
+    if prot.is_exec() {
+        [0x39, 0x87, 0xe5]
+    } else if prot.is_write() {
+        [0xd9, 0x59, 0x26]
+    } else if prot.is_read() {
+        [0x19, 0x9e, 0x70]
+    } else {
+        [0x6b, 0x6f, 0x76]
+    }
 }
 
 /// Stable pseudo-random hue per extension. The app has a validated categorical palette; this

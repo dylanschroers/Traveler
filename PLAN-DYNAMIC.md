@@ -437,18 +437,55 @@ New layout in `traveler-layout`, alongside `city`. Same `Layout` trait, same `Pl
 address order that is the whole point, and its row breaks move when weights change, which makes
 two captures incomparable.
 
-**Use a strip treemap ordered by address.** Items are laid in address order into strips across the
-rect, with strip breaks chosen greedily on average aspect ratio. Properties:
+**Use a strip treemap ordered by address.** Items are laid in address order into strips, and
+nothing is ever sorted. Properties:
 
-- **Reading order is address order** — left to right, top to bottom. That is a genuine analytic
-  property, not decoration: you can see that the heap sits below the libraries, that the mmap
-  arena is one contiguous band, that a region grew *into* the gap after it.
-- Aspect ratios are worse than squarified. Measure them (median, p90, p99, fraction over 50:1) on
-  a real target and record the numbers here, exactly as PLAN.md §4 does. If the median lands
-  beyond ~2.0 the strip heuristic needs work, not replacement.
+- **Placement order is address order, and the picture never doubles back.** That is a genuine
+  analytic property, not decoration: you can see that the heap sits below the libraries, that the
+  mmap arena is one contiguous band, that a region grew *into* the gap after it.
+- Aspect ratios are worse than squarified, so they get measured rather than assumed.
 
 Hilbert-curve layout was considered and rejected: better 2D locality, but the reading order is
 unlearnable, and "where is this address" stops having an answer a person can follow.
+
+### What the strips had to become, measured in 6d
+
+The textbook strip treemap — full-width rows, broken on mean aspect ratio — reads literally left
+to right and top to bottom, and on a real address space it is not good enough: **median aspect
+6.61, p99 1293, 11.6% hairlines** on a `python3` holding a gigabyte. The cause is structural
+rather than a tuning miss. One region holding 99.9% of the bytes takes a full-width row, and
+everything else is left to tile a strip one unit tall.
+
+Two changes, each kept because the numbers improved and for no other reason:
+
+- **Strips run along the shorter side of what is left of the rect**, which is what squarify does
+  with its leftover. Median 6.61 → 2.79, worst 1293 → 80. The cost is that a strip may now be a
+  column as easily as a row, so the promise weakens from "left to right, top to bottom" to
+  "along a strip, then the strip beyond it, never backwards". The order is still total and there
+  is a test for it; the reading path is one turn less obvious.
+- **Breaks are chosen on the worst aspect in the strip, not the mean.** On `gdb` that is median
+  2.02 against 2.12, p99 48 against 66, and 0.7% hairlines against 1.4%. Squarify's break rule and
+  squarify's sort are separable, and only the sort is the half that would lose the address order.
+
+Measured with `--no-aslr` so the runs are comparable, at the mapping level:
+
+| target | tiles | median | p90 | p99 | worst | over 50:1 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `gdb`, 52 libraries | 284 | 2.02 | 7.9 | 48.3 | 322.9 | 0.70% |
+| `python3`, 1 GiB `bytearray` | 44 | 2.73 | 34.9 | 97.3 | 97.3 | 6.8% |
+| `node` | 103 | 3.54 | 52.3 | 2630 | 3713 | 11.7% |
+
+**The remaining spread is the data, not the heuristic, and that is worth being precise about.**
+The city reaches median 1.03 because a folder holds hundreds of files of similar size, which gives
+the packer room. A region holds three to five mappings whose sizes differ by three orders of
+magnitude — a 4 KiB guard beside a 1.5 MiB `.text` — and no area-proportional layout of four such
+items in one rect produces squares. `gdb`, the target with the most tiles and therefore the most
+freedom, is the one that reaches 2.0.
+
+If this needs to improve further the next thing to try is the pivot algorithm (Shneiderman and
+Wattenberg's ordered treemap), which is still order-preserving and reports better aspect ratios
+than strips. It is not free: its reading path is a recursive arrangement rather than a sequence of
+strips, which spends more of exactly the property §8 exists to keep. Measure before adopting it.
 
 ### The union frame is what makes diff cheap
 
@@ -668,9 +705,16 @@ automation from PLAN.md §5 working unchanged. **That is a hard requirement, not
 measurement workflow depends on it.
 
 Use `bevy::state` for the mode machine (`Launcher / Loading / Disk / Process`) and gate the
-existing systems with `.run_if(in_state(...))`. Scans and captures move onto a worker thread with
-a `Loading` state, following the `DupeState` pattern already in `edges.rs`: an `Arc<Mutex<Option<T>>>`
-slot polled each frame.
+existing systems with `.run_if(in_state(...))`. Scans move onto a worker thread with a `Loading`
+state, following the `DupeState` pattern already in `edges.rs`: an `Arc<Mutex<Option<T>>>` slot
+polled each frame.
+
+**Captures do not, and cannot.** ptrace attaches a tracee to exactly one tracer *thread*, and a
+request from any other thread is `ESRCH`, so a target acquired on a worker could never be captured,
+resumed, or poked from anywhere else. Acquisition and every later capture therefore run on the main
+thread, which costs what §7 measures — half a millisecond, a fraction of a frame. If 6e's pagemap
+read makes that a dropped frame, the answer is one thread that owns the target for its lifetime and
+talks over a channel, not a worker per capture.
 
 Process enumeration for the attach picker: `/proc/*/comm` plus `/proc/*/cmdline`, or Toolhelp32.
 Cheap, and it does not need ptrace, so the list is populated even where attaching would fail —
@@ -718,7 +762,7 @@ rather than the implementation.
 | ~~**6a**~~ | `traveler-core` + `Tree` | **Done.** Mechanical. Move `NodeId` and the formatters, add the trait, make `FileIndex` implement it, generalise the layouts. No behaviour change, tests stay green. |
 | ~~**6b**~~ | Launcher, states, non-blocking scan | **Done.** Mode machine, worker-thread scan, flag short-circuits. Disk mode must behave exactly as it does today. |
 | ~~**6c**~~ | `traveler-proc`: acquire + capture, Linux | **Done.** Launch and attach, all-threads stop, `maps` -> `AddressSpace` at region/mapping level. No pages. The fixture target and its tests landed here, and caught three things argument had not: the process-directed signal hang (§4), the anonymous region limit (§2), and that a dropped target has to be killed. |
-| **6d** | Ordered treemap + render | Strip layout, the permission palette, the address space on screen. Measure aspect ratios and record them. |
+| ~~**6d**~~ | Ordered treemap + render | **Done.** Strip layout, the permission palette, the address space on screen, and the launcher's third choice. Aspect ratios measured, and the heuristic changed twice because of them (§8). |
 | **6e** | Pages | pagemap under the width and budget caps (§7), bitsets, `Target` threaded through hover/pin/HUD and the extra LOD branch (§9), pooled page blocks, soft-dirty opt-in. Measure stop time and record it. |
 | **6f** | Windows backend | Written against the now-stable snapshot shape, **before anything is built on top of it**, so the abstraction is proven rather than assumed. |
 | **6g** | `traveler-sym` tiers 1-2 | Sections and exported symbols. The single biggest legibility win in the plan. |
@@ -746,7 +790,7 @@ Windows stuffed into it.
 | `clear_refs` slows the target | Opt-in per capture, with the cost stated in the UI. |
 | Soft-dirty absent (`CONFIG_MEM_SOFT_DIRTY` off) | Runtime probe, capability flag, degrade. |
 | Anti-debug targets behave differently | Unavoidable. Surface "observed under trace" in the HUD. |
-| Strip treemap aspect ratios worse than squarified | Measure on a real target in 6d. Numbers decide, not taste. If the median is past ~2.0, improve the strip heuristic; do not go back to squarified, which cannot be ordered. |
+| Strip treemap aspect ratios worse than squarified | Measured in 6d and improved twice on the numbers: median 6.6 → 2.0-3.5 depending on target (§8). The rest is extreme size disparity across few siblings, not a heuristic failure. Pivot is the next thing to try, and costs reading order. |
 | A million pages per capture | Pages are bitsets, not nodes; blocks come from an LOD-bounded pool (§9). |
 | Pagemap is priced by mapped VA, not by RSS | Per-mapping width cap and a per-capture budget, smallest first (§7). `pages_elided` per node so the gap is stated, and raisable for one selected mapping. |
 | A new extent renumbers the whole frame | Ids belong to the frame, not the capture (§5). Extending one is a deliberate full rebuild, done for a set of captures rather than per capture. |

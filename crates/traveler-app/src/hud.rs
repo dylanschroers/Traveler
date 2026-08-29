@@ -13,6 +13,7 @@ use crate::lod::{Hover, Lod};
 use crate::palette::{CATEGORY_COUNT, Category, top_extensions};
 use crate::pin::{MAX_PAINTED, Pinned};
 use crate::satellite::SatelliteView;
+use crate::scene::SceneView;
 use crate::{City, Mode};
 use traveler_scan::{Tree, human_bytes, thousands};
 
@@ -30,7 +31,7 @@ pub struct HoverText;
 #[derive(Component)]
 pub struct EdgesText;
 
-fn panel(top: Option<f32>, bottom: Option<f32>, left: Option<f32>, right: Option<f32>) -> Node {
+pub fn panel(top: Option<f32>, bottom: Option<f32>, left: Option<f32>, right: Option<f32>) -> Node {
     Node {
         position_type: PositionType::Absolute,
         top: top.map(Val::Px).unwrap_or(Val::Auto),
@@ -220,8 +221,8 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
     ));
 }
 
-pub fn update_stats(
-    city: Res<City>,
+pub fn update_stats<S: SceneView>(
+    scene: Res<S>,
     lod: Res<Lod>,
     time: Res<Time<Real>>,
     mut smoothed: Local<f32>,
@@ -242,7 +243,7 @@ pub fn update_stats(
             "{:.0} fps\n{} drawn of {}\ndetail {} at {:.0} px",
             *smoothed,
             thousands(lod.drawn as u64),
-            thousands(city.placements.placed as u64),
+            thousands(scene.placements().placed as u64),
             if lod.enabled { "on" } else { "off" },
             lod.px_threshold,
         );
@@ -306,8 +307,8 @@ pinned   click again or esc to release",
             out.push_str(&format!(
                 "
 holds {} files in {} folders{}",
-                thousands(pinned.files),
-                thousands(pinned.dirs),
+                thousands(pinned.leaves),
+                thousands(pinned.groups),
                 if pinned.painted_all {
                     String::new()
                 } else {

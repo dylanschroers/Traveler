@@ -9,9 +9,11 @@
 
 mod city;
 pub mod satellite;
+mod space;
 pub mod svg;
 
 pub use city::{CityLayout, CityParams, HeightMode};
+pub use space::{SpaceLayout, SpaceParams};
 
 use glam::Vec3;
 use traveler_core::{NodeId, Tree};
@@ -160,4 +162,17 @@ pub fn layout_weights<T: Tree>(tree: &T, min_leaf: f64) -> Vec<f64> {
         w[p] += w[i];
     }
     w
+}
+
+/// Spacing as a fraction of the parent's shorter side, shrinking one step per level of depth.
+///
+/// The falloff gives top-level folders boulevards and deep ones seams, and it stops the spacing
+/// compounding: without it every level would surrender the same fraction and a node ten levels
+/// down would keep only a fraction of its true area.
+#[inline]
+pub(crate) fn spacing_ratio(base: f64, falloff: f64, floor: f64, depth: u16) -> f64 {
+    if base <= 0.0 {
+        return 0.0;
+    }
+    (base * falloff.powi(depth as i32)).max(floor)
 }

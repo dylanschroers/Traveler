@@ -244,7 +244,10 @@ fn place_by_bearing(
         .iter()
         .map(|p| p.map(|v| v - anchor).unwrap_or(Vec2::ZERO))
         .collect();
-    let furthest = offsets.iter().map(|o| o.length() as f64).fold(0.0f64, f64::max);
+    let furthest = offsets
+        .iter()
+        .map(|o| o.length() as f64)
+        .fold(0.0f64, f64::max);
 
     let mut placed: Vec<(f64, f64, f64)> = Vec::with_capacity(radii.len());
     let mut out = vec![(0.0, 0.0, 0.0); radii.len()];

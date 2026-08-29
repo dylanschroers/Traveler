@@ -12,6 +12,8 @@ mod lod;
 mod palette;
 mod pin;
 mod satellite;
+mod scene;
+mod space;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,7 +32,11 @@ use lod::{Hover, Lod};
 use palette::{Category, CategoryTable};
 use pin::Pinned;
 use satellite::SatelliteView;
-use traveler_layout::{CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements};
+use scene::SceneView;
+use space::Space;
+use traveler_layout::{
+    CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements, SpaceParams,
+};
 use traveler_scan::{FileIndex, NodeId, Tree};
 
 /// What the app is currently doing. Every system is gated on one of these, so a resource a mode
@@ -41,6 +47,7 @@ pub enum Mode {
     Launcher,
     Loading,
     Disk,
+    Process,
 }
 
 /// Command-line settings that outlive any one session, so `loading` can build the next one
@@ -48,16 +55,19 @@ pub enum Mode {
 #[derive(Resource, Clone, Copy)]
 pub struct Session {
     pub params: CityParams,
+    pub space: SpaceParams,
+    pub no_aslr: bool,
     pub lod: bool,
     pub lod_px: f32,
     pub select: Option<usize>,
     pub dupes: bool,
 }
 
-/// The block materials, kept so a highlighted node can be put back the way it was.
+/// The block materials, kept so a highlighted node can be put back the way it was. A slot is a
+/// file category in disk mode and a permission in process mode; the renderer does not care which.
 #[derive(Resource)]
 pub struct BlockMaterials {
-    pub by_category: Vec<Handle<StandardMaterial>>,
+    pub by_slot: Vec<Handle<StandardMaterial>>,
     pub highlight: Handle<StandardMaterial>,
     pub pinned: Handle<StandardMaterial>,
 }
@@ -86,25 +96,28 @@ impl City {
         let ctx = LayoutCtx::new(self.index.as_ref());
         CityLayout::new(self.params).place(&ctx, &mut self.placements);
         self.layout_ms = started.elapsed().as_secs_f64() * 1000.0;
-        self.subtree_top = subtree_tops(&self.index, &self.placements);
+        self.subtree_top = scene::subtree_tops(self.index.as_ref(), &self.placements);
     }
 }
 
-/// Highest y reached by a node's whole subtree. One reverse pass, since a child always has a
-/// higher id than its parent.
-fn subtree_tops(index: &FileIndex, places: &Placements) -> Vec<f32> {
-    let n = index.len();
-    let mut top = vec![0.0f32; n];
-    for (i, t) in top.iter_mut().enumerate() {
-        if places.visible[i] {
-            *t = places.center[i].y + places.size[i].y * 0.5;
-        }
+impl SceneView for City {
+    type Tree = FileIndex;
+
+    fn tree(&self) -> &FileIndex {
+        &self.index
     }
-    for i in (1..n).rev() {
-        let p = index.parent(NodeId(i as u32)).index();
-        top[p] = top[p].max(top[i]);
+    fn placements(&self) -> &Placements {
+        &self.placements
     }
-    top
+    fn subtree_top(&self) -> &[f32] {
+        &self.subtree_top
+    }
+    fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+    fn world_size(&self) -> f32 {
+        self.params.world_size as f32
+    }
 }
 
 struct Args {
@@ -124,6 +137,7 @@ struct Args {
     shot_after: f32,
     /// Pins whatever the crosshair lands on, so a screenshot can show a held selection.
     pin: bool,
+    no_aslr: bool,
 }
 
 /// Renders a fixed number of frames, saves a screenshot, and exits. Used to check the render
@@ -143,6 +157,10 @@ usage: traveler [<path>] [options]
 
   no path         open the launcher and ask
   --scan <path>   scan a folder, skipping the launcher
+  --run <cmd>     launch a program and look inside it. Takes the rest of
+                  the line, so other options come before it.
+  --attach <pid>  look inside a process that is already running
+  --no-aslr       launch with ADDR_NO_RANDOMIZE, so two runs are comparable
   --world N       side length of the city in world units (default 1000)
   --spacing N     scale the streets and walls, 1.0 is the default
   --uniform       uniform file thickness instead of log(size)
@@ -173,6 +191,7 @@ fn parse(raw: &[String]) -> Result<Args, String> {
         dupes: false,
         shot_after: 3.0,
         pin: false,
+        no_aslr: false,
     };
     let mut i = 0;
     while i < raw.len() {
@@ -182,6 +201,24 @@ fn parse(raw: &[String]) -> Result<Args, String> {
                 let path = raw.get(i).ok_or("--scan needs a path")?;
                 args.request = Some(Request::Disk(PathBuf::from(path)));
             }
+            "--run" => {
+                let program = raw.get(i + 1).ok_or("--run needs a command")?;
+                args.request = Some(Request::Launch {
+                    program: program.into(),
+                    args: raw[i + 2..].iter().map(Into::into).collect(),
+                    no_aslr: args.no_aslr,
+                });
+                i = raw.len();
+            }
+            "--attach" => {
+                i += 1;
+                let pid = raw
+                    .get(i)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--attach needs a pid")?;
+                args.request = Some(Request::Attach(pid));
+            }
+            "--no-aslr" => args.no_aslr = true,
             "--world" => {
                 i += 1;
                 args.params.world_size = raw
@@ -281,6 +318,8 @@ fn main() {
     .insert_resource(ClearColor(Color::srgb(0.043, 0.051, 0.063)))
     .insert_resource(Session {
         params: args.params,
+        space: SpaceParams::default(),
+        no_aslr: args.no_aslr,
         lod: args.lod,
         lod_px: args.lod_px,
         select: args.select,
@@ -317,23 +356,44 @@ fn main() {
         Update,
         (
             (
-                lod::update_lod,
+                lod::update_lod::<City>,
                 satellite::update_satellite,
                 satellite::pick_satellite,
             )
                 .chain(),
-            hud::update_stats,
+            hud::update_stats::<City>,
             hud::update_hover,
             hud::update_edges_panel,
-            controls,
-            reset_camera_on_key,
-            take_screenshot,
+            height_mode_input,
+            reset_camera_on_key::<City>,
             edges::edge_input,
             edges::poll_dupes,
-            (pin::pin_input, pin::update_pin, edges::paint_selection).chain(),
+            (
+                pin::pin_input,
+                pin::update_pin::<City>,
+                edges::paint_selection,
+            )
+                .chain(),
             satellite::draw_threads,
         )
             .run_if(in_state(Mode::Disk)),
+    )
+    .add_systems(OnEnter(Mode::Process), (space::spawn, space::setup_hud))
+    .add_systems(OnExit(Mode::Process), (space::close, exit_disk))
+    .add_systems(
+        Update,
+        (
+            lod::update_lod::<Space>,
+            space::update_stats,
+            space::update_hover,
+            reset_camera_on_key::<Space>,
+            (pin::pin_input, pin::update_pin::<Space>, space::paint_pin).chain(),
+        )
+            .run_if(in_state(Mode::Process)),
+    )
+    .add_systems(
+        Update,
+        (lod_input, take_screenshot).run_if(in_state(Mode::Disk).or_else(in_state(Mode::Process))),
     );
 
     if let Some(request) = args.request {
@@ -398,40 +458,10 @@ fn spawn_city(
     // One shared mesh and one material per category. Phase 0 showed this is what keeps automatic
     // batching engaged; a material per file would kill it.
     let cube = meshes.add(Cuboid::from_size(Vec3::ONE));
-    let cats = [
-        Category::Code,
-        Category::Media,
-        Category::Binary,
-        Category::Other,
-        Category::Directory,
-    ];
-    let mats: Vec<Handle<StandardMaterial>> = cats
-        .iter()
-        .map(|c| {
-            materials.add(StandardMaterial {
-                base_color: c.color(),
-                perceptual_roughness: 0.92,
-                metallic: 0.0,
-                ..default()
-            })
-        })
-        .collect();
-
-    let highlight = materials.add(StandardMaterial {
-        base_color: edges::HIGHLIGHT,
-        perceptual_roughness: 0.6,
-        ..default()
-    });
-    let pinned = materials.add(StandardMaterial {
-        base_color: edges::PINNED,
-        perceptual_roughness: 0.6,
-        ..default()
-    });
-    commands.insert_resource(BlockMaterials {
-        by_category: mats.clone(),
-        highlight: highlight.clone(),
-        pinned,
-    });
+    let block = block_materials(&mut materials);
+    let mats = block.by_slot.clone();
+    let highlight = block.highlight.clone();
+    commands.insert_resource(block);
 
     // Pool for the satellite cluster: spawned once, hidden, repositioned on selection.
     let pool = satellite::spawn_pool(&mut commands, cube.clone(), highlight);
@@ -491,6 +521,55 @@ fn spawn_city(
     }
 }
 
+/// One shared mesh and one material per slot. Phase 0 showed this is what keeps automatic
+/// batching engaged; a material per node would kill it.
+pub fn block_materials(materials: &mut Assets<StandardMaterial>) -> BlockMaterials {
+    let by_slot = [
+        Category::Code,
+        Category::Media,
+        Category::Binary,
+        Category::Other,
+        Category::Directory,
+    ]
+    .iter()
+    .map(|c| {
+        materials.add(StandardMaterial {
+            base_color: c.color(),
+            perceptual_roughness: 0.92,
+            metallic: 0.0,
+            ..default()
+        })
+    })
+    .collect();
+    BlockMaterials {
+        by_slot,
+        highlight: materials.add(StandardMaterial {
+            base_color: edges::HIGHLIGHT,
+            perceptual_roughness: 0.6,
+            ..default()
+        }),
+        pinned: materials.add(StandardMaterial {
+            base_color: edges::PINNED,
+            perceptual_roughness: 0.6,
+            ..default()
+        }),
+    }
+}
+
+/// Space and ctrl rather than the default Q/E. Vertical movement is world-aligned, so space is
+/// straight up no matter where the camera points, and ctrl would otherwise collide with the
+/// default axis-snap modifier.
+pub fn free_camera(world: f32) -> FreeCamera {
+    FreeCamera {
+        walk_speed: world * 0.09,
+        run_speed: world * 0.4,
+        key_up: KeyCode::Space,
+        key_down: KeyCode::ControlLeft,
+        key_snap_reverse: KeyCode::AltLeft,
+        ..default()
+    }
+}
+
 /// The camera outlives every session, so the launcher has something to draw its UI through.
 fn setup_camera(mut commands: Commands) {
     commands.spawn((Camera3d::default(), Transform::IDENTITY));
@@ -511,20 +590,7 @@ fn enter_disk(
         None => camera_start(world),
     };
     for entity in camera.iter() {
-        commands.entity(entity).insert((
-            start,
-            FreeCamera {
-                walk_speed: world * 0.09,
-                run_speed: world * 0.4,
-                // Space and ctrl rather than the default Q/E. Vertical movement is world-aligned,
-                // so space is straight up no matter where the camera points.
-                key_up: KeyCode::Space,
-                key_down: KeyCode::ControlLeft,
-                // Ctrl is the default axis-snap modifier, which would collide with descending.
-                key_snap_reverse: KeyCode::AltLeft,
-                ..default()
-            },
-        ));
+        commands.entity(entity).insert((start, free_camera(world)));
     }
 }
 
@@ -545,17 +611,12 @@ fn pin_from_crosshair(hover: Res<Hover>, mut pinned: ResMut<Pinned>, mut done: L
     }
 }
 
-fn camera_start(world: f32) -> Transform {
+pub fn camera_start(world: f32) -> Transform {
     Transform::from_xyz(0.0, world * 0.85, world * 1.0)
         .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y)
 }
 
-fn controls(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut lod: ResMut<Lod>,
-    mut city: ResMut<City>,
-    mut blocks: Query<(&FileNode, &mut Transform)>,
-) {
+fn lod_input(keys: Res<ButtonInput<KeyCode>>, mut lod: ResMut<Lod>) {
     if keys.just_pressed(KeyCode::KeyL) {
         lod.enabled = !lod.enabled;
     }
@@ -565,7 +626,16 @@ fn controls(
     if keys.just_pressed(KeyCode::BracketRight) {
         lod.px_threshold = (lod.px_threshold + 4.0).min(400.0);
     }
+}
 
+/// Disk only: the address space's thickness channel is not a log of anything, it is a fixed slab
+/// until 6e gives it resident fraction to carry.
+fn height_mode_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut lod: ResMut<Lod>,
+    mut city: ResMut<City>,
+    mut blocks: Query<(&FileNode, &mut Transform)>,
+) {
     if keys.just_pressed(KeyCode::KeyH) {
         city.params.height = match city.params.height {
             HeightMode::LogSize => HeightMode::Uniform,
@@ -585,16 +655,16 @@ fn controls(
     }
 }
 
-fn reset_camera_on_key(
+fn reset_camera_on_key<S: SceneView>(
     keys: Res<ButtonInput<KeyCode>>,
-    city: Res<City>,
+    scene: Res<S>,
     mut camera: Query<&mut Transform, With<Camera3d>>,
 ) {
     if !keys.just_pressed(KeyCode::KeyR) {
         return;
     }
     if let Ok(mut t) = camera.single_mut() {
-        *t = camera_start(city.params.world_size as f32);
+        *t = camera_start(scene.world_size());
     }
 }
 
@@ -610,6 +680,7 @@ mod tests {
     fn disk_path(args: &Args) -> Option<&std::path::Path> {
         match args.request.as_ref()? {
             Request::Disk(path) => Some(path.as_path()),
+            _ => None,
         }
     }
 
@@ -669,6 +740,39 @@ mod tests {
     }
 
     #[test]
+    fn run_takes_the_rest_of_the_line_as_the_targets_own_arguments() {
+        let args = parse(&argv(&[
+            "--no-aslr",
+            "--run",
+            "/bin/ls",
+            "-l",
+            "--scan",
+            "/tmp",
+        ]))
+        .expect("parse");
+        match args.request.expect("a request") {
+            Request::Launch {
+                program,
+                args,
+                no_aslr,
+            } => {
+                assert_eq!(program, "/bin/ls");
+                // --scan after --run belongs to the target, not to Traveler.
+                assert_eq!(args, ["-l", "--scan", "/tmp"]);
+                assert!(no_aslr);
+            }
+            other => panic!("wrong request: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attach_takes_a_pid() {
+        let args = parse(&argv(&["--attach", "1234"])).expect("parse");
+        assert!(matches!(args.request, Some(Request::Attach(1234))));
+        assert!(parse(&argv(&["--attach", "nope"])).is_err());
+    }
+
+    #[test]
     fn an_unknown_flag_is_an_error() {
         assert!(parse(&argv(&["--nope"])).is_err());
     }
@@ -682,8 +786,13 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(MinimalPlugins)
             .add_plugins(StatesPlugin)
+            .add_plugins(AssetPlugin::default())
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
             .insert_resource(Session {
                 params: CityParams::default(),
+                space: SpaceParams::default(),
+                no_aslr: false,
                 lod: true,
                 lod_px: 28.0,
                 select: None,
@@ -705,7 +814,10 @@ mod tests {
                 |city: Option<Res<City>>, mut seen: ResMut<CityOnEnter>| {
                     seen.0 = city.is_some();
                 },
-            );
+            )
+            // The real entry systems, so a panic in them is a failing test rather than a blank
+            // window. They need no renderer, only the two asset stores.
+            .add_systems(OnEnter(Mode::Process), (space::spawn, space::setup_hud));
         app
     }
 
@@ -744,6 +856,54 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The other half of the mode machine: a launched target has to arrive as a laid-out address
+    /// space, and the target has to be reachable afterwards so later captures and pokes can find
+    /// it. Dropping the app kills the child, since `AttachedTarget` owns what it launched.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_launch_lands_in_process_mode_with_an_address_space() {
+        use space::{Space, Target};
+
+        let mut app = headless(Request::Launch {
+            program: "/bin/sleep".into(),
+            args: vec!["30".into()],
+            no_aslr: true,
+        });
+        assert!(
+            run_until(&mut app, Mode::Process),
+            "never reached process mode"
+        );
+
+        let space = app.world().resource::<Space>();
+        assert!(space.frame.mappings().len() > 3, "too few mappings");
+        assert_eq!(space.frame.weight(space.frame.root()) % 4096, 0);
+        assert!(space.placements.placed > 0);
+        assert!(app.world().resource::<Target>().0.is_alive());
+        // OnEnter(Process) ran for real, so every visible node has a block.
+        let space = app.world().resource::<Space>();
+        let missing = space
+            .frame
+            .nodes()
+            .filter(|id| space.placements.is_visible(*id))
+            .filter(|id| space.entities[id.index()] == Entity::PLACEHOLDER)
+            .count();
+        assert_eq!(missing, 0, "{missing} placed nodes never got a block");
+        assert!(app.world().get_resource::<Lod>().is_some());
+        assert!(app.world().get_resource::<City>().is_none());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_launch_that_cannot_start_goes_back_to_the_launcher() {
+        let mut app = headless(Request::Launch {
+            program: "/nonexistent/program".into(),
+            args: vec![],
+            no_aslr: false,
+        });
+        assert!(run_until(&mut app, Mode::Launcher));
+        assert!(app.world().resource::<Launcher>().error.is_some());
     }
 
     #[test]

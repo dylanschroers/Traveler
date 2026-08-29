@@ -9,10 +9,11 @@ traveler-core = { path = "../traveler-core" }
 glam = "0.32"
 # The CLI needs a tree to lay out and the library deliberately does not know how to make one.
 traveler-scan = { path = "../traveler-scan", optional = true }
+traveler-proc = { path = "../traveler-proc", optional = true }
 
 [features]
 default = ["cli"]
-cli = ["dep:traveler-scan"]
+cli = ["dep:traveler-scan", "dep:traveler-proc"]
 
 # The property tests lay out a real scanned tree, and should not depend on a feature to do it.
 [dev-dependencies]
