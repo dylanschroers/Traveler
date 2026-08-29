@@ -9,12 +9,13 @@
 //! spawning and despawning, so switching groups costs no allocation.
 
 use bevy::prelude::*;
+use bevy::state::state_scoped::DespawnOnExit;
 use traveler_layout::satellite::{Satellite, SatelliteParams, lay_out};
 use traveler_scan::NodeId;
 
 use crate::edges::{Edges, HIGHLIGHT};
 use crate::lod::Hover;
-use crate::{City, ray_box};
+use crate::{City, Mode, ray_box};
 
 /// Pool size, and therefore the hard cap on blocks the cluster can show.
 pub const POOL: usize = 2000;
@@ -185,6 +186,7 @@ pub fn spawn_pool(
                     Transform::from_scale(Vec3::ZERO),
                     Visibility::Hidden,
                     SatelliteBlock,
+                    DespawnOnExit(Mode::Disk),
                 ))
                 .id()
         })

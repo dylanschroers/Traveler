@@ -6,19 +6,20 @@
 //! than colored text.
 
 use bevy::prelude::*;
+use bevy::state::state_scoped::DespawnOnExit;
 
 use crate::edges::{DupeState, Edges};
 use crate::lod::{Hover, Lod};
+use crate::palette::{CATEGORY_COUNT, Category, top_extensions};
 use crate::pin::{MAX_PAINTED, Pinned};
 use crate::satellite::SatelliteView;
-use crate::palette::{CATEGORY_COUNT, Category, top_extensions};
-use crate::City;
+use crate::{City, Mode};
 use traveler_scan::{Tree, human_bytes, thousands};
 
-const INK_PRIMARY: Color = Color::srgb(1.0, 1.0, 1.0);
-const INK_SECONDARY: Color = Color::srgb(0.765, 0.761, 0.718);
-const INK_MUTED: Color = Color::srgb(0.52, 0.52, 0.50);
-const PANEL: Color = Color::srgba(0.043, 0.051, 0.063, 0.82);
+pub const INK_PRIMARY: Color = Color::srgb(1.0, 1.0, 1.0);
+pub const INK_SECONDARY: Color = Color::srgb(0.765, 0.761, 0.718);
+pub const INK_MUTED: Color = Color::srgb(0.52, 0.52, 0.50);
+pub const PANEL: Color = Color::srgba(0.043, 0.051, 0.063, 0.82);
 
 #[derive(Component)]
 pub struct StatsText;
@@ -41,7 +42,7 @@ fn panel(top: Option<f32>, bottom: Option<f32>, left: Option<f32>, right: Option
     }
 }
 
-fn font(size: f32) -> TextFont {
+pub fn font(size: f32) -> TextFont {
     TextFont {
         // 0.19 made this a FontSize enum rather than a bare f32.
         font_size: FontSize::Px(size),
@@ -65,6 +66,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
             city.layout_ms,
             thousands(city.placements.placed as u64),
         )),
+        DespawnOnExit(Mode::Disk),
         font(13.0),
         TextColor(INK_SECONDARY),
     ));
@@ -73,6 +75,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
         panel(Some(10.0), None, None, Some(10.0)),
         BackgroundColor(PANEL),
         Text::new(""),
+        DespawnOnExit(Mode::Disk),
         font(13.0),
         TextColor(INK_SECONDARY),
         StatsText,
@@ -82,6 +85,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
         panel(Some(86.0), None, None, Some(10.0)),
         BackgroundColor(PANEL),
         Text::new(""),
+        DespawnOnExit(Mode::Disk),
         font(12.0),
         TextColor(INK_SECONDARY),
         EdgesText,
@@ -104,6 +108,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
                 ..default()
             },
             BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.55)),
+            DespawnOnExit(Mode::Disk),
         ));
     }
 
@@ -123,6 +128,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
         },
         BackgroundColor(PANEL),
         Text::new(""),
+        DespawnOnExit(Mode::Disk),
         font(13.0),
         TextColor(INK_PRIMARY),
         HoverText,
@@ -160,6 +166,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
             ..default()
         },
         BackgroundColor(PANEL),
+        DespawnOnExit(Mode::Disk),
     ));
     for (i, cat) in cats.iter().enumerate() {
         let y = 92.0 + (cats.len() - 1 - i) as f32 * row_h;
@@ -173,6 +180,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
                 ..default()
             },
             BackgroundColor(cat.color()),
+            DespawnOnExit(Mode::Disk),
         ));
 
         let (bytes, exts) = &per_cat[*cat as usize];
@@ -191,6 +199,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
                 ..default()
             },
             Text::new(format!("{}{}", cat.label(), detail)),
+            DespawnOnExit(Mode::Disk),
             font(12.0),
             TextColor(INK_SECONDARY),
         ));
@@ -205,6 +214,7 @@ pub fn setup_hud(mut commands: Commands, city: Res<City>) {
              tab group kind   up/down select (shift for 10)   esc clear   D find duplicates\n\
              left click pins what the crosshair is on, and lights up a folder's contents",
         ),
+        DespawnOnExit(Mode::Disk),
         font(12.0),
         TextColor(INK_MUTED),
     ));
@@ -265,7 +275,10 @@ pub fn update_hover(
         if flags.is_reparse() {
             "junction".to_string()
         } else {
-            format!("folder, {} entries", thousands(index.child_count(id) as u64))
+            format!(
+                "folder, {} entries",
+                thousands(index.child_count(id) as u64)
+            )
         }
     } else {
         let ext = index.ext_str(index.ext(id));
@@ -285,8 +298,10 @@ pub fn update_hover(
     );
 
     if pinned.node == Some(id) {
-        out.push_str("
-pinned   click again or esc to release");
+        out.push_str(
+            "
+pinned   click again or esc to release",
+        );
         if flags.is_dir() {
             out.push_str(&format!(
                 "

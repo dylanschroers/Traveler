@@ -1,11 +1,13 @@
 //! Traveler: fly through a folder tree.
 //!
-//! Phase 3. Scan, lay out, and render the city, with a free camera, a level-of-detail pass, and
-//! a crosshair readout. The scan runs before the window opens, so a cold drive prints progress to
-//! the console rather than showing a frozen frame.
+//! Phase 3, restructured in 6b. A launcher asks what to look at, the work happens on a worker
+//! thread, and a `Mode` state machine gates every system so nothing touches a session that does
+//! not exist yet.
 
 mod edges;
 mod hud;
+mod launcher;
+mod loading;
 mod lod;
 mod palette;
 mod pin;
@@ -17,18 +19,40 @@ use std::sync::Arc;
 use bevy::camera_controller::free_camera::{FreeCamera, FreeCameraPlugin};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+use bevy::state::state_scoped::DespawnOnExit;
 use bevy::window::{PresentMode, WindowResolution};
 use bevy::winit::WinitSettings;
 
-use edges::Edges;
-use lod::{Hover, Lod};
+use launcher::Launcher;
+use loading::Request;
 pub use lod::ray_box;
+use lod::{Hover, Lod};
+use palette::{Category, CategoryTable};
 use pin::Pinned;
 use satellite::SatelliteView;
-use palette::{Category, CategoryTable};
 use traveler_layout::{CityLayout, CityParams, HeightMode, Layout, LayoutCtx, Placements};
-use traveler_edges::{EdgeProvider, ExtensionGroups, NameFamilies};
-use traveler_scan::{FileIndex, NodeId, ScanOptions, Tree, human_bytes, scan};
+use traveler_scan::{FileIndex, NodeId, Tree};
+
+/// What the app is currently doing. Every system is gated on one of these, so a resource a mode
+/// does not own is never reachable from it.
+#[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Mode {
+    #[default]
+    Launcher,
+    Loading,
+    Disk,
+}
+
+/// Command-line settings that outlive any one session, so `loading` can build the next one
+/// without going back to `main`.
+#[derive(Resource, Clone, Copy)]
+pub struct Session {
+    pub params: CityParams,
+    pub lod: bool,
+    pub lod_px: f32,
+    pub select: Option<usize>,
+    pub dupes: bool,
+}
 
 /// The block materials, kept so a highlighted node can be put back the way it was.
 #[derive(Resource)]
@@ -84,7 +108,9 @@ fn subtree_tops(index: &FileIndex, places: &Placements) -> Vec<f32> {
 }
 
 struct Args {
-    path: PathBuf,
+    /// `None` opens the launcher. A flag short-circuits it, which is what keeps `--shot` and the
+    /// rest of the screenshot automation working unchanged.
+    request: Option<Request>,
     params: CityParams,
     vsync: bool,
     lod: bool,
@@ -113,8 +139,10 @@ struct ShotPlan {
 }
 
 const USAGE: &str = "\
-usage: traveler <path> [options]
+usage: traveler [<path>] [options]
 
+  no path         open the launcher and ask
+  --scan <path>   scan a folder, skipping the launcher
   --world N       side length of the city in world units (default 1000)
   --spacing N     scale the streets and walls, 1.0 is the default
   --uniform       uniform file thickness instead of log(size)
@@ -129,8 +157,12 @@ usage: traveler <path> [options]
   --pin           pin whatever the crosshair lands on, for screenshots";
 
 fn parse_args() -> Result<Args, String> {
+    parse(&std::env::args().skip(1).collect::<Vec<_>>())
+}
+
+fn parse(raw: &[String]) -> Result<Args, String> {
     let mut args = Args {
-        path: PathBuf::new(),
+        request: None,
         params: CityParams::default(),
         vsync: true,
         lod: true,
@@ -142,11 +174,14 @@ fn parse_args() -> Result<Args, String> {
         shot_after: 3.0,
         pin: false,
     };
-    let raw: Vec<String> = std::env::args().skip(1).collect();
-    let mut got_path = false;
     let mut i = 0;
     while i < raw.len() {
         match raw[i].as_str() {
+            "--scan" => {
+                i += 1;
+                let path = raw.get(i).ok_or("--scan needs a path")?;
+                args.request = Some(Request::Disk(PathBuf::from(path)));
+            }
             "--world" => {
                 i += 1;
                 args.params.world_size = raw
@@ -208,15 +243,9 @@ fn parse_args() -> Result<Args, String> {
             "--no-vsync" => args.vsync = false,
             "-h" | "--help" => return Err(String::new()),
             other if other.starts_with('-') => return Err(format!("unknown flag: {other}")),
-            other => {
-                args.path = PathBuf::from(other);
-                got_path = true;
-            }
+            other => args.request = Some(Request::Disk(PathBuf::from(other))),
         }
         i += 1;
-    }
-    if !got_path {
-        return Err(String::new());
     }
     Ok(args)
 }
@@ -233,70 +262,10 @@ fn main() {
         }
     };
 
-    println!("scanning {} ...", args.path.display());
-    let index = match scan(&args.path, &ScanOptions::default()) {
-        Ok(i) => i,
-        Err(e) => {
-            eprintln!("error: cannot scan {}: {e}", args.path.display());
-            std::process::exit(1);
-        }
-    };
-    let s = index.stats;
-    println!(
-        "  {} files, {} folders, {} in {:.2}s{}",
-        s.files,
-        s.dirs,
-        human_bytes(s.bytes),
-        s.walk_millis as f64 / 1000.0,
-        if index.errors.is_empty() {
-            String::new()
-        } else {
-            format!(", {} unreadable", index.errors.len())
-        }
-    );
-
-    let categories = CategoryTable::build(&index);
-    let n = index.len();
-
-    // The providers that need no I/O are cheap enough to just run. The duplicate finder is not,
-    // and waits for a keypress.
-    let started = std::time::Instant::now();
-    let sets = vec![
-        ExtensionGroups.compute(&index),
-        NameFamilies.compute(&index),
-    ];
-    println!(
-        "  {} extension groups, {} name families in {:.0} ms",
-        sets[0].groups.len(),
-        sets[1].groups.len(),
-        started.elapsed().as_secs_f64() * 1000.0
-    );
-    let index = Arc::new(index);
-    let index_for_dupes = index.clone();
-    let mut city = City {
-        placements: Placements::with_capacity(n),
-        subtree_top: Vec::new(),
-        entities: vec![Entity::PLACEHOLDER; n],
-        categories,
-        params: args.params,
-        layout_ms: 0.0,
-        index,
-    };
-    city.relayout();
-    println!(
-        "  laid out {} blocks in {:.0} ms",
-        city.placements.placed, city.layout_ms
-    );
-
-    let start_eye = args.shot_eye;
-    let mut lod = Lod::new(n);
-    lod.enabled = args.lod;
-    lod.px_threshold = args.lod_px;
-
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            title: format!("traveler — {}", args.path.display()),
+            title: "traveler".to_string(),
             present_mode: if args.vsync {
                 PresentMode::AutoVsync
             } else {
@@ -310,20 +279,40 @@ fn main() {
     .add_plugins(FreeCameraPlugin)
     .insert_resource(WinitSettings::continuous())
     .insert_resource(ClearColor(Color::srgb(0.043, 0.051, 0.063)))
-    .insert_resource(city)
-    .insert_resource(lod)
-    .insert_resource(Hover::default())
-    .insert_resource(Pinned::default())
-    .insert_resource({
-        let mut e = Edges::new(sets);
-        e.selected = args.select;
-        if args.dupes {
-            e.start_dupe_scan(index_for_dupes);
-        }
-        e
+    .insert_resource(Session {
+        params: args.params,
+        lod: args.lod,
+        lod_px: args.lod_px,
+        select: args.select,
+        dupes: args.dupes,
     })
-    .insert_resource(StartEye(start_eye))
-    .add_systems(Startup, (spawn_city, hud::setup_hud))
+    .insert_resource(StartEye(args.shot_eye))
+    .init_resource::<Launcher>()
+    .insert_state(if args.request.is_some() {
+        Mode::Loading
+    } else {
+        Mode::Launcher
+    })
+    .add_systems(Startup, setup_camera)
+    .add_systems(OnEnter(Mode::Launcher), launcher::setup)
+    .add_systems(
+        Update,
+        (launcher::input, launcher::update)
+            .chain()
+            .run_if(in_state(Mode::Launcher)),
+    )
+    .add_systems(OnEnter(Mode::Loading), loading::begin)
+    .add_systems(
+        Update,
+        (loading::update, loading::poll)
+            .chain()
+            .run_if(in_state(Mode::Loading)),
+    )
+    .add_systems(
+        OnEnter(Mode::Disk),
+        (spawn_city, hud::setup_hud, enter_disk),
+    )
+    .add_systems(OnExit(Mode::Disk), (loading::close_disk, exit_disk))
     .add_systems(
         Update,
         (
@@ -343,11 +332,15 @@ fn main() {
             edges::poll_dupes,
             (pin::pin_input, pin::update_pin, edges::paint_selection).chain(),
             satellite::draw_threads,
-        ),
+        )
+            .run_if(in_state(Mode::Disk)),
     );
 
+    if let Some(request) = args.request {
+        app.insert_resource(request);
+    }
     if args.pin {
-        app.add_systems(Update, pin_from_crosshair);
+        app.add_systems(Update, pin_from_crosshair.run_if(in_state(Mode::Disk)));
     }
     if let Some(path) = args.shot {
         app.add_observer(save_to_disk(path.clone()));
@@ -401,7 +394,6 @@ fn spawn_city(
     mut city: ResMut<City>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    start_eye: Res<StartEye>,
 ) {
     // One shared mesh and one material per category. Phase 0 showed this is what keeps automatic
     // batching engaged; a material per file would kill it.
@@ -470,6 +462,7 @@ fn spawn_city(
                         .with_scale(places.size[id.index()]),
                     Visibility::Hidden,
                     FileNode(id),
+                    DespawnOnExit(Mode::Disk),
                 ))
                 .id();
             spawned.push((id, entity));
@@ -479,56 +472,66 @@ fn spawn_city(
         city.entities[id.index()] = entity;
     }
 
-    let world = city.params.world_size as f32;
-
     // Key light plus two fills. The palette was validated as base colors, so the lighting is kept
     // close to flat: a steep key on the top faces, fills to keep the sides from going black.
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 4_000.0,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::IDENTITY.looking_at(Vec3::new(-0.35, -1.0, -0.5), Vec3::Y),
-    ));
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 1_500.0,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::IDENTITY.looking_at(Vec3::new(0.8, -0.35, 0.6), Vec3::Y),
-    ));
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 1_100.0,
-            shadow_maps_enabled: false,
-            ..default()
-        },
-        Transform::IDENTITY.looking_at(Vec3::new(0.2, -0.2, -0.9), Vec3::Y),
-    ));
+    for (illuminance, at) in [
+        (4_000.0, Vec3::new(-0.35, -1.0, -0.5)),
+        (1_500.0, Vec3::new(0.8, -0.35, 0.6)),
+        (1_100.0, Vec3::new(0.2, -0.2, -0.9)),
+    ] {
+        commands.spawn((
+            DirectionalLight {
+                illuminance,
+                shadow_maps_enabled: false,
+                ..default()
+            },
+            Transform::IDENTITY.looking_at(at, Vec3::Y),
+            DespawnOnExit(Mode::Disk),
+        ));
+    }
+}
 
+/// The camera outlives every session, so the launcher has something to draw its UI through.
+fn setup_camera(mut commands: Commands) {
+    commands.spawn((Camera3d::default(), Transform::IDENTITY));
+}
+
+/// The free-look controller is a disk-mode thing: in the launcher, W and S are letters.
+fn enter_disk(
+    mut commands: Commands,
+    city: Res<City>,
+    start_eye: Res<StartEye>,
+    camera: Query<Entity, With<Camera3d>>,
+) {
+    let world = city.params.world_size as f32;
     let start = match start_eye.0 {
         Some(eye) => {
             Transform::from_translation(eye).looking_at(Vec3::new(0.0, world * 0.02, 0.0), Vec3::Y)
         }
         None => camera_start(world),
     };
-    commands.spawn((
-        Camera3d::default(),
-        start,
-        FreeCamera {
-            walk_speed: world * 0.09,
-            run_speed: world * 0.4,
-            // Space and ctrl rather than the default Q/E. Vertical movement is world-aligned, so
-            // space is straight up no matter where the camera points.
-            key_up: KeyCode::Space,
-            key_down: KeyCode::ControlLeft,
-            // Ctrl is the default axis-snap modifier, which would collide with descending.
-            key_snap_reverse: KeyCode::AltLeft,
-            ..default()
-        },
-    ));
+    for entity in camera.iter() {
+        commands.entity(entity).insert((
+            start,
+            FreeCamera {
+                walk_speed: world * 0.09,
+                run_speed: world * 0.4,
+                // Space and ctrl rather than the default Q/E. Vertical movement is world-aligned,
+                // so space is straight up no matter where the camera points.
+                key_up: KeyCode::Space,
+                key_down: KeyCode::ControlLeft,
+                // Ctrl is the default axis-snap modifier, which would collide with descending.
+                key_snap_reverse: KeyCode::AltLeft,
+                ..default()
+            },
+        ));
+    }
+}
+
+fn exit_disk(mut commands: Commands, camera: Query<Entity, With<FreeCamera>>) {
+    for entity in camera.iter() {
+        commands.entity(entity).remove::<FreeCamera>();
+    }
 }
 
 /// Screenshot helper: takes the first thing the crosshair sees and holds it.
@@ -595,3 +598,163 @@ fn reset_camera_on_key(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::state::app::StatesPlugin;
+
+    fn argv(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn disk_path(args: &Args) -> Option<&std::path::Path> {
+        match args.request.as_ref()? {
+            Request::Disk(path) => Some(path.as_path()),
+        }
+    }
+
+    #[test]
+    fn no_arguments_opens_the_launcher() {
+        let args = parse(&argv(&[])).expect("parse");
+        assert!(args.request.is_none());
+    }
+
+    #[test]
+    fn a_bare_path_still_goes_straight_to_the_disk_city() {
+        let args = parse(&argv(&["/tmp/x"])).expect("parse");
+        assert_eq!(disk_path(&args), Some(std::path::Path::new("/tmp/x")));
+    }
+
+    #[test]
+    fn scan_flag_goes_straight_to_the_disk_city() {
+        let args = parse(&argv(&["--scan", "/tmp/x"])).expect("parse");
+        assert_eq!(disk_path(&args), Some(std::path::Path::new("/tmp/x")));
+    }
+
+    /// The screenshot workflow is a hard requirement of the restructure: every flag it uses has
+    /// to survive alongside a target, and the target still has to short-circuit the launcher.
+    #[test]
+    fn the_screenshot_flags_survive_the_launcher() {
+        let args = parse(&argv(&[
+            "/tmp/x",
+            "--shot",
+            "out.png",
+            "--shot-eye",
+            "1,2,3",
+            "--shot-after",
+            "5",
+            "--select",
+            "7",
+            "--dupes",
+            "--pin",
+            "--no-vsync",
+            "--no-lod",
+            "--uniform",
+            "--lod-px",
+            "12",
+            "--world",
+            "500",
+        ]))
+        .expect("parse");
+
+        assert_eq!(disk_path(&args), Some(std::path::Path::new("/tmp/x")));
+        assert_eq!(args.shot.as_deref(), Some(std::path::Path::new("out.png")));
+        assert_eq!(args.shot_eye, Some(Vec3::new(1.0, 2.0, 3.0)));
+        assert_eq!(args.shot_after, 5.0);
+        assert_eq!(args.select, Some(7));
+        assert!(args.dupes && args.pin && !args.vsync && !args.lod);
+        assert_eq!(args.params.height, HeightMode::Uniform);
+        assert_eq!(args.lod_px, 12.0);
+        assert_eq!(args.params.world_size, 500.0);
+    }
+
+    #[test]
+    fn an_unknown_flag_is_an_error() {
+        assert!(parse(&argv(&["--nope"])).is_err());
+    }
+
+    /// Set by an `OnEnter(Disk)` system, which is where `spawn_city` and `setup_hud` run and
+    /// where a missing `City` would be a panic rather than a wrong picture.
+    #[derive(Resource, Default)]
+    struct CityOnEnter(bool);
+
+    fn headless(request: Request) -> App {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .add_plugins(StatesPlugin)
+            .insert_resource(Session {
+                params: CityParams::default(),
+                lod: true,
+                lod_px: 28.0,
+                select: None,
+                dupes: false,
+            })
+            .init_resource::<Launcher>()
+            .insert_resource(request)
+            .insert_state(Mode::Loading)
+            .add_systems(OnEnter(Mode::Loading), loading::begin)
+            .add_systems(
+                Update,
+                (loading::update, loading::poll)
+                    .chain()
+                    .run_if(in_state(Mode::Loading)),
+            )
+            .init_resource::<CityOnEnter>()
+            .add_systems(
+                OnEnter(Mode::Disk),
+                |city: Option<Res<City>>, mut seen: ResMut<CityOnEnter>| {
+                    seen.0 = city.is_some();
+                },
+            );
+        app
+    }
+
+    fn run_until(app: &mut App, want: Mode) -> bool {
+        for _ in 0..600 {
+            app.update();
+            if *app.world().resource::<State<Mode>>().get() == want {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
+    /// The scan is on a worker thread now, so the transition into a session is the thing that can
+    /// break: the city has to exist by the time anything gated on `Disk` can run.
+    #[test]
+    fn a_scan_lands_in_disk_mode_with_a_city() {
+        let dir = std::env::temp_dir().join(format!("traveler-mode-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).expect("fixture");
+        std::fs::write(dir.join("a.rs"), b"fn main() {}").expect("fixture");
+        std::fs::write(dir.join("sub/b.txt"), b"hello").expect("fixture");
+
+        let mut app = headless(Request::Disk(dir.clone()));
+        assert!(run_until(&mut app, Mode::Disk), "never reached disk mode");
+
+        let city = app.world().resource::<City>();
+        assert_eq!(city.index.len(), 4);
+        assert!(city.placements.placed > 0);
+        assert!(app.world().get_resource::<Lod>().is_some());
+        assert!(app.world().get_resource::<Hover>().is_some());
+        assert!(app.world().get_resource::<loading::Loading>().is_none());
+        assert!(
+            app.world().resource::<CityOnEnter>().0,
+            "OnEnter(Disk) ran before the city was inserted"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_scan_that_fails_goes_back_to_the_launcher_with_the_reason() {
+        let missing = std::env::temp_dir().join("traveler-does-not-exist-9c1f");
+        let mut app = headless(Request::Disk(missing));
+        assert!(
+            run_until(&mut app, Mode::Launcher),
+            "never returned to the launcher"
+        );
+        assert!(app.world().resource::<Launcher>().error.is_some());
+        assert!(app.world().get_resource::<City>().is_none());
+    }
+}
