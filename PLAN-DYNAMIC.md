@@ -680,10 +680,22 @@ itself with `object`:
 - **Separate debug files.** `.note.gnu.build-id` points at `/usr/lib/debug/.build-id/...`. Cheap
   to check, and on distro binaries it upgrades tier 2 to tier 3 for free.
 
-**Tier 3 — when debug info exists.** `gimli` + `addr2line` for DWARF, `pdb` for PDB: types,
-struct layouts, locals, line numbers. This is what makes "poke a variable" mean a variable rather
-than an address. **Deferred to phase 8** — it is a large subsystem and tiers 1 and 2 must be solid
-and shipped first.
+**Tier 3 — when debug info exists.** `gimli` + `addr2line` for DWARF: line numbers, and globals
+with types wide enough to write. This is what makes "poke a variable" mean a variable rather than
+an address, and the typed poke is the untyped one with the width filled in rather than a second
+way of writing bytes.
+
+**One thing about it did not survive contact, and it is not small.** C and C++ give a global a
+`DW_AT_location` holding `DW_OP_addr`, so placing it is reading one attribute. **Rust does not**:
+it emits the type and a `DW_AT_linkage_name` and leaves the address to the ELF symbol table, so
+tier 3 has to join the two. Requiring a location finds exactly one global in a Rust binary — a
+vtable — and misses every static in the program. An array is the same story for size: DWARF states
+its extent through `DW_TAG_subrange_type` bounds rather than a byte size, so the symbol's size is
+the fallback.
+
+Locals, struct layouts and PDB are **still deferred**: locals need a frame base and a register
+context, which is phase 9's stack unwinding rather than this one's, and PDB needs a Windows
+machine to be worth writing against.
 
 The tier in use is shown in the HUD. A person needs to know whether they are reading a name or a
 guess.
@@ -834,8 +846,8 @@ rather than the implementation.
 | ~~**6h**~~ | Capture and diff | **Done, less the breakpoint.** Multiple captures on a key, boundary-split union frame, the diverging encoding measured against the same floors as the categorical hues (§10), the view named in the HUD. The single-shot entry-point breakpoint from §4 is **not** built: without it capture 0 is where the user pressed the key rather than the `execve` stop, so the linking diff is available from `--run` only by taking a capture immediately. |
 | ~~**6i**~~ | Poke | **Done.** Untyped writes at a stop, on both backends. `P` on a pinned node or page, with the width said out loud and a value too wide for its type refused rather than truncated. |
 | ~~**7**~~ | Pointer graph | **Done.** Worker thread, aggregated mapping-to-mapping edges, drill-down within a selection. Only resident pages are read, so the scan does not fault in the working set it is measuring. |
-| **8** | Tier 3 symbols | DWARF and PDB. Types, locals, line numbers. Typed pokes. |
-| **9** | Full debugger control | Breakpoints, stepping, watchpoints, unwinding, behind the existing `AttachedTarget` seam. |
+| ~~**8**~~ | Tier 3 symbols | **Done for DWARF, less locals.** Line numbers, typed globals, separate debug files by build-id, typed pokes, the tier stated in the HUD. Locals need a register context and a frame base, which is phase 9. PDB is unwritten: it needs a Windows machine to be worth writing against, and §16 already says everything measured here is Linux. |
+| **9** | Full debugger control | Breakpoints, stepping, watchpoints, unwinding, behind the existing `AttachedTarget` seam. **Not built.** It is the phase that needs the execution-control state machine §1 defers, and the single-shot entry breakpoint from §4 is its smallest useful piece. |
 
 **On 6f's position:** "abstracted from day one" means the trait and the snapshot struct are
 designed against *both* capability lists from 6c (which §6 above does), not that both backends are

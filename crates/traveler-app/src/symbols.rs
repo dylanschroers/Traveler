@@ -10,7 +10,11 @@
 use std::collections::HashMap;
 
 use bevy::prelude::*;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use traveler_proc::{MappingFacts, Prot, SubExtent};
+
+use traveler_sym::debug::{DebugInfo, separate_debug_file};
 use traveler_sym::{Images, SectionKind};
 
 /// Matches the page the rest of the view is drawn in.
@@ -18,17 +22,22 @@ const PAGE: u64 = 4096;
 
 /// Which tier the view is actually running at, so the HUD can say whether a name is a name or a
 /// guess.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Tier {
     /// Mappings, permissions, sizes, page state, backing paths. Never empty, never gated.
     One,
     /// Plus sections and exported symbols, from the image on disk.
     Two,
+    /// Plus line numbers and typed globals, when the image carries debug information or points at
+    /// a separate file that does.
+    Three,
 }
 
 #[derive(Resource, Default)]
 pub struct Symbols {
     images: Images,
+    /// Tier 3 per image, parsed on first use and remembered as absent when there is none.
+    debug: HashMap<String, Option<Arc<DebugInfo>>>,
     /// Where each image's link view actually landed, so a link-view address can be turned into a
     /// real one and back.
     bias: HashMap<String, u64>,
@@ -38,11 +47,17 @@ pub struct Symbols {
 
 impl Symbols {
     pub fn tier(&self) -> Tier {
-        if self.sections > 0 {
+        if self.debug.values().any(Option::is_some) {
+            Tier::Three
+        } else if self.sections > 0 {
             Tier::Two
         } else {
             Tier::One
         }
+    }
+
+    pub fn with_debug(&self) -> usize {
+        self.debug.values().filter(|d| d.is_some()).count()
     }
 
     pub fn sections(&self) -> usize {
@@ -56,6 +71,7 @@ impl Symbols {
     /// One list per mapping, ready for the frame. Runs after the target is resumed.
     pub fn build(&mut self, mappings: &[MappingFacts<'_>]) -> Vec<Vec<SubExtent>> {
         self.bias.clear();
+        self.debug.clear();
         self.sections = 0;
         self.named = 0;
 
@@ -71,7 +87,7 @@ impl Symbols {
         }
 
         for (path, at) in &start {
-            let Some(image) = self.images.get(std::path::Path::new(path)) else {
+            let Some(image) = self.images.get(Path::new(path)) else {
                 continue;
             };
             self.bias
@@ -94,7 +110,7 @@ impl Symbols {
         let Some(bias) = self.bias.get(m.path).copied() else {
             return Vec::new();
         };
-        let Some(image) = self.images.get(std::path::Path::new(m.path)) else {
+        let Some(image) = self.images.get(Path::new(m.path)) else {
             return Vec::new();
         };
 
@@ -123,9 +139,69 @@ impl Symbols {
     /// mapped from. `None` when nothing was parsed or nothing covers it.
     pub fn name_at(&mut self, path: &str, addr: u64) -> Option<(String, u64)> {
         let bias = self.bias.get(path).copied()?;
-        let image = self.images.get(std::path::Path::new(path))?;
+        let image = self.images.get(Path::new(path))?;
         let (name, offset) = image.symbol_at(addr.checked_sub(bias)?)?;
         Some((name.to_string(), offset))
+    }
+
+    /// Everything tier 3 can say about an address: the line of source it belongs to, and the
+    /// global it is inside, with a type wide enough to write.
+    pub fn detail_at(&mut self, path: &str, addr: u64) -> Vec<String> {
+        let Some(bias) = self.bias.get(path).copied() else {
+            return Vec::new();
+        };
+        let Some(link) = addr.checked_sub(bias) else {
+            return Vec::new();
+        };
+        let Some(info) = self.debug_for(path) else {
+            return Vec::new();
+        };
+
+        let mut out = Vec::new();
+        if let Some(location) = info.locate(link)
+            && location.line > 0
+        {
+            out.push(format!("{}:{}", location.file, location.line));
+        }
+        if let Some((global, into)) = info.global_at(link) {
+            let width = global
+                .kind
+                .literal(global.size)
+                .map_or_else(|| format!("{} bytes", global.size), str::to_string);
+            out.push(match into {
+                0 => format!("{}: {} ({width})", global.name, global.type_name),
+                _ => format!("{}+{into:#x}: {} ({width})", global.name, global.type_name),
+            });
+        }
+        out
+    }
+
+    /// The poke literal prefix for whatever is at `addr`, so a typed poke is the untyped one with
+    /// the width filled in rather than a second way of writing bytes.
+    ///
+    /// Only at the start of a scalar: halfway into an array is an address, not a variable, and
+    /// saying otherwise would be a guess dressed as a type.
+    pub fn literal_at(&mut self, path: &str, addr: u64) -> Option<&'static str> {
+        let bias = self.bias.get(path).copied()?;
+        let link = addr.checked_sub(bias)?;
+        let info = self.debug_for(path)?;
+        let (global, into) = info.global_at(link)?;
+        (into == 0).then_some(global.kind.literal(global.size))?
+    }
+
+    /// `.note.gnu.build-id` points at `/usr/lib/debug/.build-id/...`, which is where a distro
+    /// binary keeps what was stripped out of it. Cheap to check, and it upgrades tier 2 to tier 3
+    /// for free.
+    fn debug_for(&mut self, path: &str) -> Option<Arc<DebugInfo>> {
+        if let Some(found) = self.debug.get(path) {
+            return found.clone();
+        }
+        let owned = PathBuf::from(path);
+        let parsed = DebugInfo::parse(&owned)
+            .or_else(|| separate_debug_file(&owned).and_then(|p| DebugInfo::parse(&p)))
+            .map(Arc::new);
+        self.debug.insert(path.to_string(), parsed.clone());
+        parsed
     }
 }
 

@@ -421,6 +421,12 @@ pub fn setup_hud(
             space.layout_ms,
             // A person needs to know whether they are reading a name or a guess.
             match symbols.tier() {
+                Tier::Three => format!(
+                    "tier 3: {} sections from {} images, {} with debug info",
+                    thousands(symbols.sections() as u64),
+                    thousands(symbols.images() as u64),
+                    thousands(symbols.with_debug() as u64)
+                ),
                 Tier::Two => format!(
                     "tier 2: {} sections from {} images",
                     thousands(symbols.sections() as u64),
@@ -586,6 +592,11 @@ pub fn update_hover(
                     format!(" +{into:#x}")
                 }
             ));
+        }
+        // Tier 3, when the image carries debug information: the line of source, and the global
+        // with a type wide enough to write.
+        for line in symbols.detail_at(&path, at) {
+            out.push_str(&format!("\n{line}"));
         }
     }
     if pinned.target == Some(target) {

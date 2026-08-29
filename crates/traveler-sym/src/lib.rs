@@ -8,6 +8,8 @@
 //! Tier 1 is no symbol work at all and is always available. This is tier 2: sections and exported
 //! symbols, which need only the binary itself. Tier 3 — DWARF and PDB — is phase 8.
 
+pub mod debug;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -128,6 +130,15 @@ impl Image {
 
     pub fn symbol_count(&self) -> usize {
         self.symbols.len()
+    }
+
+    /// The address of a named symbol, for asking a later tier about a place that is definitely
+    /// this image's own.
+    pub fn address_of(&self, name: &str) -> Option<u64> {
+        self.symbols
+            .iter()
+            .find(|s| self.str(s.name) == name)
+            .map(|s| s.addr)
     }
 
     #[inline]

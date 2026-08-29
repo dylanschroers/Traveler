@@ -136,6 +136,7 @@ pub fn input(
     mut poke: ResMut<Poke>,
     pinned: Res<Pinned>,
     space: Res<Space>,
+    mut symbols: ResMut<crate::symbols::Symbols>,
     mut traced: ResMut<Traced>,
 ) {
     for key in keys.read() {
@@ -144,10 +145,14 @@ pub fn input(
         }
         if !poke.open {
             // Only with something held: a poke needs an address, and the crosshair moves.
-            if key.key_code == KeyCode::KeyP && pinned.target.is_some() {
+            if key.key_code == KeyCode::KeyP
+                && let Some(target) = pinned.target
+            {
                 poke.open = true;
-                poke.text.clear();
                 poke.result = None;
+                // With tier 3, the prompt opens knowing the width: a typed poke is the untyped
+                // one with the type filled in, not a second way of writing bytes.
+                poke.text = typed_prefix(&space, &mut symbols, target).unwrap_or_default();
             }
             continue;
         }
@@ -184,6 +189,18 @@ pub fn input(
             }
         }
     }
+}
+
+/// The literal prefix for whatever the pin is on, when debug information says what it is.
+fn typed_prefix(
+    space: &Space,
+    symbols: &mut crate::symbols::Symbols,
+    target: Target,
+) -> Option<String> {
+    let (path, _) = space.frame.backing(target.node())?;
+    let path = path.to_string();
+    let literal = symbols.literal_at(&path, address(space, target))?;
+    Some(format!("{literal} "))
 }
 
 #[cfg(test)]
