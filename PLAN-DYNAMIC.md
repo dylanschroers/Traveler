@@ -637,11 +637,24 @@ in this design.
 
 A diverging ramp is a different encoding channel from categorical hue and is not subject to the
 all-pairs constraint, because the ordering does the work that separation would otherwise have to.
-That is an argument, not a measurement, and §18 does not allow the difference: **run the ramp
-through the same validator the three hues went through**, on the same dark surface and under the
-same CVD simulation, before 6h ships. A diverging ramp a deuteranope reads as flat is the exact
-failure the categorical work already found once, and it is not a failure that shows up in a
-screenshot.
+That was an argument rather than a measurement, and §18 does not allow the difference, so the ramp
+went through the same validator the three hues did. It did not need the exemption:
+
+| pair | normal ΔE | deuteranope ΔE |
+| --- | ---: | ---: |
+| added / unchanged | 22.2 | 23.9 |
+| added / removed | 48.0 | 65.2 |
+| unchanged / removed | 31.6 | 33.7 |
+
+Contrast on the surface is 4.79, 3.45 and 4.48 to one. The floors are the ones PLAN.md §5 recorded
+for the categorical set — 20.9 normal, 9.4 CVD, 3:1 contrast — and every pair clears all three.
+
+**It reads better to a deuteranope than to normal vision, and that is the reason rather than a
+fluke.** The ends of the ramp are code blue and media orange, the two of the three validated hues
+that sit on the blue-yellow axis, which is the axis deuteranopia preserves; collapsing the other
+axis loses nothing that this ramp was using. The validator is checked in with a negative control
+that asserts it rejects a red-to-green ramp, because three passing tests prove nothing if the
+thing cannot fail.
 
 ---
 
@@ -809,7 +822,7 @@ rather than the implementation.
 | ~~**6e**~~ | Pages | **Done.** pagemap under caps counted in pages (§7), bitsets, `Target` threaded through hover/pin/HUD and the extra branch on the detail pass (§9), pooled page blocks, soft-dirty opt-in, resident fraction on the thickness channel. Stop time measured, and the cost model rewritten because of it. |
 | ~~**6f**~~ | Windows backend | **Written and compile-checked, not run.** `VirtualQueryEx`, `QueryWorkingSetEx`, Toolhelp32 suspend, `GetMappedFileNameW` with the DOS-path conversion. Cross-checked with `cargo check --target x86_64-pc-windows-msvc`, which is what proves the abstraction; runtime correctness needs a Windows machine and is unverified. |
 | ~~**6g**~~ | `traveler-sym` tiers 1-2 | **Done.** Sections as a third level with gaps filling what they do not cover, `.dynsym` names on the crosshair, images parsed once and keyed by path and mtime, the tier stated in the HUD. `gdb` goes from 361 nodes to 892. |
-| **6h** | Capture and diff | Multiple captures, boundary-split union frame, the diverging diff encoding and its validation (§10), a capture list in the HUD. Ends with the single-shot entry-point breakpoint from §4, which is what turns the linking diff on. |
+| ~~**6h**~~ | Capture and diff | **Done, less the breakpoint.** Multiple captures on a key, boundary-split union frame, the diverging encoding measured against the same floors as the categorical hues (§10), the view named in the HUD. The single-shot entry-point breakpoint from §4 is **not** built: without it capture 0 is where the user pressed the key rather than the `execve` stop, so the linking diff is available from `--run` only by taking a capture immediately. |
 | **6i** | Poke | Untyped writes at a stop. |
 | **7** | Pointer graph | Worker thread, aggregated mapping-to-mapping edges, drill-down within a selection. |
 | **8** | Tier 3 symbols | DWARF and PDB. Types, locals, line numbers. Typed pokes. |

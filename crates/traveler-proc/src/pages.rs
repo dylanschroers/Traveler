@@ -95,7 +95,7 @@ impl RawPages {
 }
 
 /// Decoded page state, parallel to the frame's mappings.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PageBits {
     bit_start: Vec<u64>,
     pages: Vec<u32>,

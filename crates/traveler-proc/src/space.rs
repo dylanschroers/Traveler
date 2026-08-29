@@ -134,6 +134,35 @@ pub struct SubExtent {
     pub prot: Prot,
 }
 
+/// A mapping kept beyond the capture that produced it, so a later frame can be built over several
+/// captures at once. A process has hundreds of these, not millions, so they own their strings.
+#[derive(Clone, Debug)]
+pub struct OwnedMapping {
+    pub addr: u64,
+    pub len: u64,
+    pub prot: Prot,
+    pub path: String,
+    pub offset: u64,
+    pub dev: u64,
+    pub inode: u64,
+    pub group: u64,
+}
+
+impl From<&MappingFacts<'_>> for OwnedMapping {
+    fn from(m: &MappingFacts<'_>) -> Self {
+        Self {
+            addr: m.addr,
+            len: m.len,
+            prot: m.prot,
+            path: m.path.to_string(),
+            offset: m.offset,
+            dev: m.dev,
+            inode: m.inode,
+            group: m.group,
+        }
+    }
+}
+
 /// The ordered set of extents ids are assigned over, and what a layout is a pure function of.
 pub struct Frame {
     parent: Vec<NodeId>,

@@ -384,6 +384,7 @@ fn main() {
     .add_systems(
         Update,
         (
+            (space::capture_input, space::restage).chain(),
             (lod::update_lod::<Space>, space::update_pages).chain(),
             space::update_stats,
             space::update_hover,
@@ -391,6 +392,7 @@ fn main() {
             reset_camera_on_key::<Space>,
             (pin::pin_input, pin::update_pin::<Space>, space::paint_pin).chain(),
         )
+            .chain()
             .run_if(in_state(Mode::Process)),
     )
     .add_systems(

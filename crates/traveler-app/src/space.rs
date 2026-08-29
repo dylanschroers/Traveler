@@ -11,7 +11,9 @@ use bevy::prelude::*;
 use bevy::state::state_scoped::DespawnOnExit;
 use traveler_core::{Tree, human_bytes, thousands};
 use traveler_layout::{Layout, LayoutCtx, Placements, SpaceLayout, SpaceParams};
-use traveler_proc::{AddressSpace, AttachedTarget, Frame, NodeKind, pages::PAGE};
+use traveler_proc::{
+    AddressSpace, AttachedTarget, Change, Frame, NodeKind, Prot, Union, pages::PAGE,
+};
 
 use crate::hud::{INK_MUTED, INK_SECONDARY, PANEL, font, panel};
 use crate::lod::{Hover, Lod};
@@ -34,9 +36,30 @@ pub enum SpaceHeight {
     Resident,
 }
 
+/// What the city is showing: one capture, or the change between two.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Capture(usize),
+    /// Both captures render into one geometry, because the frame is shared. §8: the diff is a
+    /// recolour pass over one `Placements`, not a second layout.
+    Diff {
+        before: usize,
+        after: usize,
+    },
+}
+
+/// Where a node's facts come from. A single capture answers about pages and residency; a diff
+/// answers about change, and deliberately answers nothing about pages — §10 replaces the
+/// categorical encoding in diff mode rather than layering on it.
+pub enum Source {
+    Capture(Box<AddressSpace>),
+    Diff(Box<Union>),
+}
+
 #[derive(Resource)]
 pub struct Space {
-    pub capture: AddressSpace,
+    pub source: Source,
+    pub view: View,
     pub frame: Arc<Frame>,
     pub placements: Placements,
     pub subtree_top: Vec<f32>,
@@ -51,16 +74,25 @@ pub struct Space {
 #[derive(Resource)]
 pub struct Traced(pub AttachedTarget);
 
+/// Every capture taken of this target, oldest first. Kept whole, because a frame is built over
+/// all of them and a capture cannot be re-taken.
+#[derive(Resource, Default)]
+pub struct Captures(pub Vec<AddressSpace>);
+
 impl Space {
-    pub fn new(capture: AddressSpace, params: SpaceParams) -> Self {
-        let frame = capture.frame().clone();
+    pub fn build(source: Source, view: View, params: SpaceParams) -> Self {
+        let frame = match &source {
+            Source::Capture(space) => space.frame().clone(),
+            Source::Diff(union) => union.frame.clone(),
+        };
         let mut placements = Placements::with_capacity(frame.len());
         let started = std::time::Instant::now();
         SpaceLayout::new(params).place(&LayoutCtx::new(frame.as_ref()), &mut placements);
         let layout_ms = started.elapsed().as_secs_f64() * 1000.0;
         let entities = vec![Entity::PLACEHOLDER; frame.len()];
         let mut space = Self {
-            capture,
+            source,
+            view,
             frame,
             placements,
             subtree_top: Vec::new(),
@@ -71,6 +103,39 @@ impl Space {
         };
         space.apply_height();
         space
+    }
+
+    /// The capture whose facts a readout should quote: the later one in a diff.
+    pub fn shown(&self) -> usize {
+        match self.view {
+            View::Capture(i) => i,
+            View::Diff { after, .. } => after,
+        }
+    }
+
+    #[inline]
+    pub fn prot(&self, id: NodeId) -> Prot {
+        match &self.source {
+            Source::Capture(space) => space.prot(id),
+            Source::Diff(union) => union.prot[self.shown()][id.index()],
+        }
+    }
+
+    /// `None` in diff mode: page state belongs to one capture, and a union extent is not one.
+    pub fn pages(&self) -> Option<&AddressSpace> {
+        match &self.source {
+            Source::Capture(space) => Some(space),
+            Source::Diff(_) => None,
+        }
+    }
+
+    pub fn change(&self, id: NodeId) -> Option<Change> {
+        match (&self.source, self.view) {
+            (Source::Diff(union), View::Diff { before, after }) => {
+                Some(union.change(before, after, id))
+            }
+            _ => None,
+        }
     }
 
     /// Rewrites the thickness channel in place. Layout stays a pure function of the tree: how tall
@@ -84,14 +149,14 @@ impl Space {
             if !self.placements.is_visible(id) {
                 continue;
             }
-            let t = match self.height {
-                SpaceHeight::Uniform => thin,
+            let fraction = match (&self.source, self.height) {
+                (_, SpaceHeight::Uniform) => None,
                 // Unknown reads as flat rather than as full, since a mapping nobody looked at is
                 // not a mapping that is entirely resident.
-                SpaceHeight::Resident => {
-                    thin + self.capture.resident_fraction(id).unwrap_or(0.0) * (thick - thin)
-                }
+                (Source::Capture(space), SpaceHeight::Resident) => space.resident_fraction(id),
+                (Source::Diff(_), SpaceHeight::Resident) => None,
             };
+            let t = thin + fraction.unwrap_or(0.0) * (thick - thin);
             let i = id.index();
             self.placements.size[i].y = t;
             self.placements.center[i].y = base(id) + t * 0.5;
@@ -99,13 +164,22 @@ impl Space {
         self.subtree_top = subtree_tops(self.frame.as_ref(), &self.placements);
     }
 
-    /// Which of the five materials a node wears. The slots are the same ones the disk city uses,
-    /// so the palette stays the validated three hues plus two neutrals.
+    /// Which of the materials a node wears. In a single capture that is its permissions, using
+    /// the three validated hues. In a diff the categorical encoding is switched off entirely and
+    /// the diverging ramp takes over, which is what §10 requires rather than six hues.
     fn slot(&self, id: NodeId) -> Category {
-        if self.frame.kind(id) != NodeKind::Mapping {
+        if let Some(change) = self.change(id) {
+            return match change {
+                Change::Added => Category::Code,
+                Change::Removed => Category::Media,
+                Change::Unchanged => Category::Other,
+                Change::Absent => Category::Directory,
+            };
+        }
+        if self.frame.kind(id) != NodeKind::Mapping && self.frame.kind(id) != NodeKind::Section {
             return Category::Directory;
         }
-        let prot = self.capture.prot(id);
+        let prot = self.prot(id);
         if prot.is_exec() {
             Category::Code
         } else if prot.is_write() {
@@ -114,6 +188,17 @@ impl Space {
             Category::Binary
         } else {
             Category::Other
+        }
+    }
+}
+
+pub fn source_for(captures: &Captures, view: View) -> Source {
+    match view {
+        View::Capture(i) => Source::Capture(Box::new(captures.0[i].clone())),
+        View::Diff { .. } => {
+            let facts: Vec<Vec<traveler_proc::OwnedMapping>> =
+                captures.0.iter().map(|c| c.mappings().to_vec()).collect();
+            Source::Diff(Box::new(Union::build("diff", &facts, &|_| Vec::new())))
         }
     }
 }
@@ -144,6 +229,14 @@ pub struct SpaceHover;
 #[derive(Component)]
 pub struct SpaceStats;
 
+/// The one cuboid every block shares, kept so a new frame can respawn without re-adding it.
+#[derive(Resource)]
+pub struct BlockMesh(pub Handle<Mesh>);
+
+/// Set when the frame changed under the scene, which a new capture or a switch of view does.
+#[derive(Resource, Default)]
+pub struct Restage(pub bool);
+
 pub fn spawn(
     mut commands: Commands,
     mut space: ResMut<Space>,
@@ -160,29 +253,10 @@ pub fn spawn(
     );
     commands.insert_resource(pages);
 
-    let mut spawned = Vec::with_capacity(space.placements.placed);
-    for id in space.frame.nodes() {
-        if !space.placements.is_visible(id) {
-            continue;
-        }
-        let slot = space.slot(id);
-        let entity = commands
-            .spawn((
-                Mesh3d(cube.clone()),
-                MeshMaterial3d(block.by_slot[slot as usize].clone()),
-                Transform::from_translation(space.placements.center[id.index()])
-                    .with_scale(space.placements.size[id.index()]),
-                Visibility::Hidden,
-                FileNode(id),
-                DespawnOnExit(Mode::Process),
-            ))
-            .id();
-        spawned.push((id, entity));
-    }
-    for (id, entity) in spawned {
-        space.entities[id.index()] = entity;
-    }
+    stage(&mut commands, &mut space, &cube, &block);
+    commands.insert_resource(BlockMesh(cube));
     commands.insert_resource(block);
+    commands.init_resource::<Restage>();
 
     for (illuminance, at) in [
         (4_000.0, Vec3::new(-0.35, -1.0, -0.5)),
@@ -208,14 +282,125 @@ pub fn spawn(
     }
 }
 
+/// One block per placed node. Extending a frame renumbers it, so a new capture is a full rebuild
+/// rather than an incremental one — which is what §5 says it costs and why it is not done per
+/// capture behind the user's back.
+fn stage(commands: &mut Commands, space: &mut Space, cube: &Handle<Mesh>, block: &BlockMaterials) {
+    space.entities = vec![Entity::PLACEHOLDER; space.frame.len()];
+    let mut spawned = Vec::with_capacity(space.placements.placed);
+    for id in space.frame.nodes() {
+        if !space.placements.is_visible(id) {
+            continue;
+        }
+        let slot = space.slot(id);
+        let entity = commands
+            .spawn((
+                Mesh3d(cube.clone()),
+                MeshMaterial3d(block.by_slot[slot as usize].clone()),
+                Transform::from_translation(space.placements.center[id.index()])
+                    .with_scale(space.placements.size[id.index()]),
+                Visibility::Hidden,
+                FileNode(id),
+                DespawnOnExit(Mode::Process),
+            ))
+            .id();
+        spawned.push((id, entity));
+    }
+    for (id, entity) in spawned {
+        space.entities[id.index()] = entity;
+    }
+}
+
+/// Another capture, or another view of the ones already taken.
+#[allow(clippy::too_many_arguments)]
+pub fn capture_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut traced: ResMut<Traced>,
+    mut captures: ResMut<Captures>,
+    mut space: ResMut<Space>,
+    mut symbols: ResMut<Symbols>,
+    mut restage: ResMut<Restage>,
+    mut lod: ResMut<Lod>,
+) {
+    let count = captures.0.len();
+    let want = if keys.just_pressed(KeyCode::KeyC) {
+        let taken = traced
+            .0
+            .capture_sections(&traveler_proc::CaptureOptions::default(), &mut |mappings| {
+                symbols.build(mappings)
+            });
+        match taken {
+            Ok(capture) => {
+                captures.0.push(capture);
+                Some(View::Capture(captures.0.len() - 1))
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                None
+            }
+        }
+    } else if keys.just_pressed(KeyCode::Comma) {
+        Some(View::Capture(space.shown().saturating_sub(1)))
+    } else if keys.just_pressed(KeyCode::Period) {
+        Some(View::Capture((space.shown() + 1).min(count - 1)))
+    } else if keys.just_pressed(KeyCode::KeyX) && count > 1 {
+        Some(match space.view {
+            View::Diff { .. } => View::Capture(count - 1),
+            View::Capture(_) => View::Diff {
+                before: count - 2,
+                after: count - 1,
+            },
+        })
+    } else {
+        None
+    };
+
+    let Some(want) = want else {
+        return;
+    };
+    if want == space.view {
+        return;
+    }
+    *space = Space::build(source_for(&captures, want), want, space.params);
+    restage.0 = true;
+    lod.mark_all_expanded();
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn restage(
+    mut commands: Commands,
+    mut restage: ResMut<Restage>,
+    mut space: ResMut<Space>,
+    mesh: Res<BlockMesh>,
+    block: Res<BlockMaterials>,
+    mut lod: ResMut<Lod>,
+    mut pinned: ResMut<Pinned>,
+    mut hover: ResMut<Hover>,
+    existing: Query<Entity, With<FileNode>>,
+) {
+    if !restage.0 {
+        return;
+    }
+    restage.0 = false;
+    for entity in existing.iter() {
+        commands.entity(entity).despawn();
+    }
+    stage(&mut commands, &mut space, &mesh.0, &block);
+    // Every id the old frame minted is meaningless against the new one.
+    *lod = Lod::new(space.frame.len());
+    pinned.target = None;
+    hover.target = None;
+}
+
 pub fn setup_hud(
     mut commands: Commands,
     space: Res<Space>,
     traced: Res<Traced>,
     symbols: Res<Symbols>,
+    captures: Res<Captures>,
 ) {
     let frame = &space.frame;
-    let meta = space.capture.meta();
+    let meta = captures.0[space.shown()].meta().clone();
     commands.spawn((
         panel(Some(10.0), None, Some(10.0), None),
         BackgroundColor(PANEL),
@@ -278,13 +463,24 @@ pub fn setup_hud(
     ));
 
     // Hue carries permissions, so the legend says which is which and the readout says the rest.
-    let rows = [
-        (Category::Code, "executable   r-x, .text, PLT"),
-        (Category::Media, "writable   heap, stack, .data, anon"),
-        (Category::Binary, "read-only   .rodata, file-backed"),
-        (Category::Other, "reserved   PROT_NONE, guards"),
-        (Category::Directory, "regions"),
-    ];
+    // In diff mode the categorical encoding is switched off entirely and the same three slots
+    // carry a diverging ramp instead, which is why the legend is rebuilt with the view.
+    let rows = match space.view {
+        View::Capture(_) => [
+            (Category::Code, "executable   r-x, .text, PLT"),
+            (Category::Media, "writable   heap, stack, .data, anon"),
+            (Category::Binary, "read-only   .rodata, file-backed"),
+            (Category::Other, "reserved   PROT_NONE, guards"),
+            (Category::Directory, "regions"),
+        ],
+        View::Diff { .. } => [
+            (Category::Code, "added   mapped since the earlier capture"),
+            (Category::Other, "unchanged"),
+            (Category::Media, "removed   unmapped since"),
+            (Category::Binary, "unused in diff mode"),
+            (Category::Directory, "in neither capture"),
+        ],
+    };
     let row_h = 19.0;
     commands.spawn((
         Node {
@@ -332,6 +528,7 @@ pub fn setup_hud(
         Text::new(
             "WASD move   space/ctrl up-down   shift run   scroll speed   right-click or M grab mouse\n\
              L level of detail   [ ] detail threshold   H height channel   R reset camera\n\
+             C new capture   , . step captures   X diff the last two\n\
              left click pins   fly close to a mapping to see its pages",
         ),
         font(12.0),
@@ -412,21 +609,25 @@ fn node_readout(space: &Space, id: NodeId) -> String {
         NodeKind::Section => "section",
         NodeKind::Gap => "gap",
     };
-    let residency = match space.capture.resident_fraction(id) {
-        Some(f) => format!(
-            "{} resident ({:.0}%)",
-            human_bytes(space.capture.resident_bytes(id)),
-            f * 100.0
-        ),
-        // Said plainly, because "not read" is not "not resident".
-        None => "residency not read".to_string(),
+    let detail = match (space.change(id), space.pages()) {
+        (Some(change), _) => format!("{change:?} between the two captures"),
+        (None, Some(capture)) => match capture.resident_fraction(id) {
+            Some(f) => format!(
+                "{} resident ({:.0}%)",
+                human_bytes(capture.resident_bytes(id)),
+                f * 100.0
+            ),
+            // Said plainly, because "not read" is not "not resident".
+            None => "residency not read".to_string(),
+        },
+        (None, None) => String::new(),
     };
     format!(
-        "{:016x}-{:016x}\n{}   {}   {} {}\n{residency}",
+        "{:016x}-{:016x}\n{}   {}   {} {}\n{detail}",
         frame.addr(id),
         frame.end(id),
         human_bytes(frame.weight(id)),
-        space.capture.prot(id),
+        space.prot(id),
         kind,
         frame.label(id),
     )
@@ -435,8 +636,11 @@ fn node_readout(space: &Space, id: NodeId) -> String {
 fn page_readout(space: &Space, mapping: NodeId, page: u32) -> String {
     let frame = &space.frame;
     let addr = frame.addr(mapping) + page as u64 * PAGE;
-    let m = space.capture.mapping_index(mapping).unwrap_or(0);
-    let pages = space.capture.pages();
+    let Some(capture) = space.pages() else {
+        return node_readout(space, mapping);
+    };
+    let m = capture.mapping_index(mapping).unwrap_or(0);
+    let pages = capture.pages();
     let state = if pages.is_present(m, page) {
         "resident"
     } else if pages.is_swapped(m, page) {
@@ -448,7 +652,7 @@ fn page_readout(space: &Space, mapping: NodeId, page: u32) -> String {
         "{:016x}-{:016x}\n4 KiB   {}   page {} of {}\n{state}{}   in {}",
         addr,
         addr + PAGE,
-        space.capture.prot(mapping),
+        space.prot(mapping),
         thousands(page as u64),
         thousands(pages.pages(m) as u64),
         if pages.is_dirty(m, page) {
@@ -490,6 +694,7 @@ pub fn update_stats(
     space: Res<Space>,
     lod: Res<Lod>,
     pages: Res<PageView>,
+    captures: Res<Captures>,
     time: Res<Time<Real>>,
     mut smoothed: Local<f32>,
     mut stats: Query<&mut Text, With<SpaceStats>>,
@@ -505,7 +710,7 @@ pub fn update_stats(
     }
     if let Ok(mut text) = stats.single_mut() {
         text.0 = format!(
-            "{:.0} fps\n{} drawn of {}\n{} page blocks\ndetail {} at {:.0} px\nheight {}",
+            "{:.0} fps\n{} drawn of {}\n{} page blocks\ndetail {} at {:.0} px\nheight {}\n{}",
             *smoothed,
             thousands(lod.drawn as u64),
             thousands(space.placements.placed as u64),
@@ -516,11 +721,15 @@ pub fn update_stats(
                 SpaceHeight::Resident => "resident",
                 SpaceHeight::Uniform => "uniform",
             },
+            match space.view {
+                View::Capture(i) => format!("capture {} of {}", i + 1, captures.0.len()),
+                View::Diff { before, after } => format!("diff {} to {}", before + 1, after + 1),
+            },
         );
     }
 }
 
-/// The pin overlay, put back to the permission colour when it moves.
+/// The pin overlay, put back to whatever the node was wearing when it moves.
 pub fn paint_pin(
     space: Res<Space>,
     pinned: Res<Pinned>,
@@ -551,6 +760,7 @@ pub fn close(mut commands: Commands) {
     commands.remove_resource::<Space>();
     commands.remove_resource::<Symbols>();
     commands.remove_resource::<PageView>();
+    commands.remove_resource::<Captures>();
     commands.remove_resource::<Traced>();
     commands.remove_resource::<Lod>();
     commands.remove_resource::<Hover>();
@@ -649,7 +859,13 @@ pub fn update_pages(
     let focal = Lod::focal(window.resolution.physical_height().max(1) as f32);
 
     view.live.clear();
-    let pages = space.capture.pages();
+    // Page state belongs to one capture. A diff renders a union frame, where an extent is not
+    // any one capture's mapping, so there is nothing to draw pages from.
+    let Some(capture) = space.pages() else {
+        hide(&mut view, &mut blocks);
+        return;
+    };
+    let pages = capture.pages();
     let step = space.params.level_step;
 
     for &raw in lod.reached() {
@@ -657,7 +873,7 @@ pub fn update_pages(
         if space.frame.kind(id) != NodeKind::Mapping {
             continue;
         }
-        let Some(m) = space.capture.mapping_index(id) else {
+        let Some(m) = capture.mapping_index(id) else {
             continue;
         };
         let count = pages.pages(m);
@@ -747,6 +963,25 @@ pub fn update_pages(
 
 /// Rows and columns for a mapping's pages, chosen so the cells come out square-ish in whatever
 /// rect the mapping got. Row-major, so reading the grid is reading addresses.
+fn hide(
+    view: &mut PageView,
+    blocks: &mut Query<
+        (
+            &mut Transform,
+            &mut Visibility,
+            &mut MeshMaterial3d<StandardMaterial>,
+        ),
+        With<PageBlock>,
+    >,
+) {
+    for slot in 0..view.shown {
+        if let Ok((_, mut vis, _)) = blocks.get_mut(view.pool[slot]) {
+            *vis = Visibility::Hidden;
+        }
+    }
+    view.shown = 0;
+}
+
 fn page_grid(count: u32, width: f32, depth: f32) -> (u32, u32) {
     let cols = ((count as f32 * (width / depth.max(1e-6))).sqrt().ceil() as u32).clamp(1, count);
     (cols, count.div_ceil(cols))

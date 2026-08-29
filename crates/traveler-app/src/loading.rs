@@ -239,7 +239,7 @@ fn acquire(_: &Request) -> Result<Opened, String> {
 
 #[cfg(target_os = "linux")]
 fn open_process(commands: &mut Commands, session: &Session, opened: ProcessSession) {
-    use crate::space::{Space, Traced};
+    use crate::space::{Captures, Source, Space, Traced, View};
 
     let ProcessSession {
         target,
@@ -257,7 +257,11 @@ fn open_process(commands: &mut Commands, session: &Session, opened: ProcessSessi
         meta.threads,
     );
 
-    let space = Space::new(capture, session.space);
+    let space = Space::build(
+        Source::Capture(Box::new(capture.clone())),
+        View::Capture(0),
+        session.space,
+    );
     println!(
         "  laid out {} blocks in {:.0} ms",
         space.placements.placed, space.layout_ms
@@ -275,6 +279,7 @@ fn open_process(commands: &mut Commands, session: &Session, opened: ProcessSessi
     );
 
     commands.insert_resource(space);
+    commands.insert_resource(Captures(vec![capture]));
     commands.insert_resource(Traced(target));
     commands.insert_resource(symbols);
     commands.insert_resource(lod);

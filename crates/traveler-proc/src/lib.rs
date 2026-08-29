@@ -7,6 +7,7 @@
 pub mod maps;
 pub mod pages;
 mod space;
+mod union;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -14,7 +15,10 @@ mod linux;
 mod windows;
 
 pub use pages::{PageBits, PageLimits};
-pub use space::{Backing, Frame, MappingFacts, NodeKind, Prot, SubExtent, fill_sections};
+pub use space::{
+    Backing, Frame, MappingFacts, NodeKind, OwnedMapping, Prot, SubExtent, fill_sections,
+};
+pub use union::{Change, Union};
 
 /// Turns a capture's mappings into the sub-extents inside them, one list per mapping. A callback
 /// rather than a trait or a dependency: `traveler-sym` reads files and this crate reads the
@@ -64,12 +68,19 @@ pub struct CaptureMeta {
 }
 
 /// One capture, over a frame. Every column is parallel to that frame's ids.
+///
+/// Cloneable because switching which capture is on screen rebuilds the scene from one, and the
+/// frame itself is shared rather than copied.
+#[derive(Clone)]
 pub struct AddressSpace {
     frame: Arc<Frame>,
     present: Vec<bool>,
     prot: Vec<Prot>,
     /// Page state per mapping, never per page as nodes. See §9.
     pages: PageBits,
+    /// The facts this capture was built from, kept so a later frame can be built over several
+    /// captures at once. Hundreds of entries, not millions.
+    mappings: Vec<OwnedMapping>,
     /// Resident bytes and unreadable bytes, rolled up so every level of the tree can answer.
     /// Both are exactly additive, which is what lets a region report what its mappings hold.
     resident: Vec<u64>,
@@ -143,6 +154,7 @@ impl AddressSpace {
             present: vec![true; n],
             prot,
             pages,
+            mappings: mappings.iter().map(OwnedMapping::from).collect(),
             resident,
             unknown,
             caps,
@@ -153,6 +165,12 @@ impl AddressSpace {
     #[inline]
     pub fn pages(&self) -> &PageBits {
         &self.pages
+    }
+
+    /// What this capture saw, in address order, for building a frame across several of them.
+    #[inline]
+    pub fn mappings(&self) -> &[OwnedMapping] {
+        &self.mappings
     }
 
     /// Page state is parallel to the frame's mappings, not to its nodes, so a node that is not a
