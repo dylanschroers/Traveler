@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/traveler-core",
     "crates/traveler-scan",
+    "crates/traveler-proc",
     "crates/traveler-layout",
     "crates/traveler-edges",
     "crates/traveler-app",

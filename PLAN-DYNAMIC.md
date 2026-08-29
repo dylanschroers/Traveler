@@ -90,6 +90,12 @@ counts as a backing of its own.** A `PROT_NONE` guard and the `rw-` stack beside
 region, which is what `AllocationBase` says about the same memory on Windows; a lone `mmap` is a
 region of one. One pass over the address-sorted extents, and it needs no `smaps` read to get it.
 
+The rule's limit, found by the fixture test in 6c rather than by argument: **two adjacent
+anonymous mappings from unrelated `mmap` calls fuse**, because `maps` records nothing that tells
+them apart. Windows does not have the problem because it records the allocation. On Linux a region
+is therefore "what is contiguous and alike", not "what one call made", and the test asserts the
+weaker true thing rather than the stronger convenient one.
+
 ---
 
 ## 3. Crate layout
@@ -150,9 +156,9 @@ depends on.
 Two ways in, one thing out. `AttachedTarget` is "a stopped process I may read and write."
 
 ```
-launch:  fork -> PTRACE_TRACEME -> execve       -> stopped at entry  -\
-                                                                       >- AttachedTarget
-attach:  PTRACE_SEIZE(pid) -> PTRACE_INTERRUPT  -> stopped            -/
+launch:  fork -> PTRACE_TRACEME -> execve  -> stopped at the execve stop  -\
+                                                                            >- AttachedTarget
+attach:  PTRACE_ATTACH(pid)               -> stopped                      -/
 ```
 
 Everything downstream — maps, pagemap, memory reads, ELF parsing, the snapshot, the layout, the
@@ -197,6 +203,22 @@ this wrong and the failure is a torn snapshot that looks fine.
 
 Windows has the same requirement with different plumbing: suspend every thread from a Toolhelp32
 thread snapshot, or use the debug-event stop, which stops the whole process.
+
+### What the stop actually is, which is not what was sketched
+
+**`SIGSTOP` and `PTRACE_CONT`, not `SEIZE` and `INTERRUPT`.** `PTRACE_INTERRUPT` works only on a
+tracee that arrived by `PTRACE_SEIZE`, and a tracee that arrived by `PTRACE_TRACEME` cannot be
+seized afterwards — so the sketch above quietly asked for two stop mechanisms, one per acquisition
+path, for no gain. Both paths freeze the same way instead, and so do helper threads.
+
+**And the signal has to be thread-directed.** `kill(pid, SIGSTOP)` is process-directed: the kernel
+gives it to whichever thread will take it, which on a multithreaded target is usually not the
+leader, and `waitpid` on the leader then blocks forever. It hangs rather than failing, which is
+exactly the kind of thing this file exists to write down. Use `tgkill(pid, pid, SIGSTOP)`.
+
+**A launched target is killed when Traveler drops it.** `PTRACE_O_EXITKILL` covers a crash, but a
+clean drop detaches first and clears it, which left a parked fixture behind after every test until
+the drop was made to kill and reap what it launched.
 
 ### Being traced is observable
 
@@ -346,6 +368,15 @@ Slurp `maps` into a `String` and the pagemap extents into a `Vec<u64>`, resume t
 all parsing, tree building, interning, and layout afterwards on data you already own. Parsing
 `maps` while the target waits is pure dead time and it is the easy mistake.
 
+And one rule about what a capture is allowed to change:
+
+> **A capture observes; it does not decide whether the target runs.**
+
+Whether the target is running after a capture is exactly whether it was running before. A capture
+of a running target stops it, reads, and resumes it inside the window below; a capture at the
+`execve` stop leaves it stopped, so capture 0 stays inspectable. Any other policy either makes the
+launch path's t=0 unusable or leaves the target frozen behind the user's back.
+
 Budget for a target with 1 GB resident and 4 GB mapped, to be measured and recorded here the way
 PLAN.md records everything else:
 
@@ -359,6 +390,18 @@ PLAN.md records everything else:
 | parse + build + lay out, after resume | < 100 ms |
 
 If total stop exceeds ~100 ms on a realistic target, something is being parsed inside the window.
+
+Measured at 6c, before pages, on Linux 7.0 with `ptrace_scope` 1:
+
+| target | threads | mappings | mapped | stop |
+| --- | ---: | ---: | ---: | ---: |
+| `python3` holding a 1 GiB `bytearray` | 1 | 44 | 1.0 GiB | 0.39-0.58 ms |
+| the same, with 8 spinning threads | 9 | 76 | 1.6 GiB | 0.38-0.63 ms |
+| the capture fixture | 5 | 21 | 1.3 MiB | under 0.1 ms |
+
+Stop time at this phase is the `maps` read plus one seize per thread, and neither scales with
+mapped bytes — nine threads cost no more than one. The number that will actually move is the
+pagemap read in 6e, which is why the cap below exists before the code that needs it.
 
 ### Pagemap is priced by address space, not by working set
 
@@ -672,9 +715,9 @@ rather than the implementation.
 
 | | | |
 | --- | --- | --- |
-| **6a** | `traveler-core` + `Tree` | Mechanical. Move `NodeId` and the formatters, add the trait, make `FileIndex` implement it, generalise the layouts. No behaviour change, tests stay green. |
-| **6b** | Launcher, states, non-blocking scan | Mode machine, worker-thread scan, flag short-circuits. Disk mode must behave exactly as it does today. |
-| **6c** | `traveler-proc`: acquire + capture, Linux | Launch and attach, all-threads stop, `maps` -> `AddressSpace` at region/mapping level. No pages yet. Fixture target and its tests land here. |
+| ~~**6a**~~ | `traveler-core` + `Tree` | **Done.** Mechanical. Move `NodeId` and the formatters, add the trait, make `FileIndex` implement it, generalise the layouts. No behaviour change, tests stay green. |
+| ~~**6b**~~ | Launcher, states, non-blocking scan | **Done.** Mode machine, worker-thread scan, flag short-circuits. Disk mode must behave exactly as it does today. |
+| ~~**6c**~~ | `traveler-proc`: acquire + capture, Linux | **Done.** Launch and attach, all-threads stop, `maps` -> `AddressSpace` at region/mapping level. No pages. The fixture target and its tests landed here, and caught three things argument had not: the process-directed signal hang (§4), the anonymous region limit (§2), and that a dropped target has to be killed. |
 | **6d** | Ordered treemap + render | Strip layout, the permission palette, the address space on screen. Measure aspect ratios and record them. |
 | **6e** | Pages | pagemap under the width and budget caps (§7), bitsets, `Target` threaded through hover/pin/HUD and the extra LOD branch (§9), pooled page blocks, soft-dirty opt-in. Measure stop time and record it. |
 | **6f** | Windows backend | Written against the now-stable snapshot shape, **before anything is built on top of it**, so the abstraction is proven rather than assumed. |

@@ -5166,6 +5166,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "traveler-proc"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "traveler-core",
+]
+
+[[package]]
 name = "traveler-scan"
 version = "0.1.0"
 dependencies = [
