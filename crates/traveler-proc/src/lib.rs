@@ -6,6 +6,7 @@
 
 pub mod maps;
 pub mod pages;
+pub mod pointers;
 mod space;
 mod union;
 
@@ -15,6 +16,7 @@ mod linux;
 mod windows;
 
 pub use pages::{PageBits, PageLimits};
+pub use pointers::{MemoryReader, PointerEdge, Pointers, ScanLimits};
 pub use space::{
     Backing, Frame, MappingFacts, NodeKind, OwnedMapping, Prot, SubExtent, fill_sections,
 };

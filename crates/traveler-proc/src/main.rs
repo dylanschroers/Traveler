@@ -17,7 +17,8 @@ usage: traveler-proc [options] --run <cmd> [args...]
   --captures N    take N captures rather than one
   --wait MS       let the target run this long before the first capture (default 300)
   --no-aslr       launch with ADDR_NO_RANDOMIZE, so two runs are comparable
-  --top N         list the N largest regions (default 12)";
+  --top N         list the N largest regions (default 12)
+  --pointers      scan for pointers and report the topology";
 
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -27,6 +28,7 @@ fn main() -> ExitCode {
     let mut wait_ms = 300u64;
     let mut no_aslr = false;
     let mut top = 12usize;
+    let mut pointers = false;
 
     let mut i = 0;
     while i < raw.len() {
@@ -71,6 +73,7 @@ fn main() -> ExitCode {
                 }
             }
             "--no-aslr" => no_aslr = true,
+            "--pointers" => pointers = true,
             "-h" | "--help" => return usage(""),
             other => return usage(&format!("unknown argument: {other}")),
         }
@@ -100,7 +103,12 @@ fn main() -> ExitCode {
     for n in 0..captures {
         std::thread::sleep(std::time::Duration::from_millis(wait_ms));
         match target.capture() {
-            Ok(space) => report(&space, n, top),
+            Ok(space) => {
+                report(&space, n, top);
+                if pointers {
+                    report_pointers(&target, &space, top);
+                }
+            }
             Err(e) => return fail(&e.to_string()),
         }
     }
@@ -184,6 +192,47 @@ fn report(space: &AddressSpace, n: usize, top: usize) {
         bytes(anonymous)
     );
     debug_assert_eq!(frame.kind(frame.root()), NodeKind::Process);
+}
+
+/// §13 asks for the false-positive rate to be reported rather than assumed, so this prints it.
+fn report_pointers(target: &AttachedTarget, space: &AddressSpace, top: usize) {
+    use traveler_proc::{MemoryReader, ScanLimits, pointers};
+
+    let reader = MemoryReader::new(target.pid());
+    let found = pointers::scan(&reader, space, &ScanLimits::default());
+    let frame = space.frame();
+
+    println!(
+        "\n  pointers: {} edges over {} words in {:.0} ms{}",
+        thousands(found.edges.len() as u64),
+        thousands(found.words),
+        found.elapsed.as_secs_f64() * 1000.0,
+        if found.truncated {
+            "   (budget spent)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "  {} candidates, {:.0} per million words, against {:.2} per million by chance ({:.0}x)",
+        thousands(found.found),
+        found.hit_rate(),
+        found.chance_rate(),
+        found.hit_rate() / found.chance_rate().max(f64::MIN_POSITIVE)
+    );
+    println!("  {} read", bytes(found.bytes_read));
+    for edge in found.edges.iter().take(top) {
+        println!(
+            "  {:>10}  {:<26} -> {}",
+            thousands(edge.count),
+            clip(frame.label(edge.from), 26),
+            clip(frame.label(edge.to), 26)
+        );
+    }
+}
+
+fn thousands(n: u64) -> String {
+    traveler_core::thousands(n)
 }
 
 fn bytes(n: u64) -> String {

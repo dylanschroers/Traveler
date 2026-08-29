@@ -733,8 +733,17 @@ an explicit action on a key, run on a worker thread, result dropped in when read
 That machinery already exists in `edges.rs` and should be reused rather than re-invented.
 
 False positives: a 47-bit sparse address space makes a random aligned word landing inside a mapped
-extent unlikely, so precision is good without any heuristics. Report the rate rather than assuming
-it.
+extent unlikely, so precision should be good without any heuristics — and the rate is reported
+rather than assumed. On `gdb`, 2.56M words scanned in 73 ms give 266,924 candidates, which is
+104,163 per million against **0.38 per million by chance** for a word drawn uniformly from the
+user address range. That is 274,000 times above chance, and it is the only honest precision
+statement available without ground truth, since nothing here knows which words were *meant* to be
+pointers.
+
+**Only resident pages are read**, and that is not an optimisation: reading an absent page would
+fault it in and change the working set of the process being measured. The bitsets from 6e are what
+make it possible to know which those are, which is a use for them that §9 did not anticipate. A
+test asserts the target's resident set does not grow across a scan.
 
 ---
 
@@ -824,7 +833,7 @@ rather than the implementation.
 | ~~**6g**~~ | `traveler-sym` tiers 1-2 | **Done.** Sections as a third level with gaps filling what they do not cover, `.dynsym` names on the crosshair, images parsed once and keyed by path and mtime, the tier stated in the HUD. `gdb` goes from 361 nodes to 892. |
 | ~~**6h**~~ | Capture and diff | **Done, less the breakpoint.** Multiple captures on a key, boundary-split union frame, the diverging encoding measured against the same floors as the categorical hues (§10), the view named in the HUD. The single-shot entry-point breakpoint from §4 is **not** built: without it capture 0 is where the user pressed the key rather than the `execve` stop, so the linking diff is available from `--run` only by taking a capture immediately. |
 | ~~**6i**~~ | Poke | **Done.** Untyped writes at a stop, on both backends. `P` on a pinned node or page, with the width said out loud and a value too wide for its type refused rather than truncated. |
-| **7** | Pointer graph | Worker thread, aggregated mapping-to-mapping edges, drill-down within a selection. |
+| ~~**7**~~ | Pointer graph | **Done.** Worker thread, aggregated mapping-to-mapping edges, drill-down within a selection. Only resident pages are read, so the scan does not fault in the working set it is measuring. |
 | **8** | Tier 3 symbols | DWARF and PDB. Types, locals, line numbers. Typed pokes. |
 | **9** | Full debugger control | Breakpoints, stepping, watchpoints, unwinding, behind the existing `AttachedTarget` seam. |
 

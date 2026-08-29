@@ -19,6 +19,7 @@ use crate::hud::{INK_MUTED, INK_SECONDARY, PANEL, font, panel};
 use crate::lod::{Hover, Lod};
 use crate::palette::Category;
 use crate::pin::{MAX_PAINTED, Pinned};
+use crate::pointers::Scan;
 use crate::poke::Poke;
 use crate::scene::{SceneView, Target, subtree_tops};
 use crate::symbols::{Symbols, Tier};
@@ -254,6 +255,7 @@ pub fn spawn(
     );
     commands.insert_resource(pages);
     commands.init_resource::<Poke>();
+    commands.init_resource::<Scan>();
 
     stage(&mut commands, &mut space, &cube, &block);
     commands.insert_resource(BlockMesh(cube));
@@ -531,7 +533,8 @@ pub fn setup_hud(
             "WASD move   space/ctrl up-down   shift run   scroll speed   right-click or M grab mouse\n\
              L level of detail   [ ] detail threshold   H height channel   R reset camera\n\
              C new capture   , . step captures   X diff the last two\n\
-             left click pins   P writes bytes at the pin   fly close to see pages",
+             left click pins   P writes bytes at the pin   G scans for pointers\n\
+             fly close to a mapping to see its pages",
         ),
         font(12.0),
         TextColor(INK_MUTED),
@@ -701,11 +704,13 @@ pub fn height_input(
     lod.mark_all_expanded();
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_stats(
     space: Res<Space>,
     lod: Res<Lod>,
     pages: Res<PageView>,
     captures: Res<Captures>,
+    scan: Res<Scan>,
     time: Res<Time<Real>>,
     mut smoothed: Local<f32>,
     mut stats: Query<&mut Text, With<SpaceStats>>,
@@ -737,6 +742,8 @@ pub fn update_stats(
                 View::Diff { before, after } => format!("diff {} to {}", before + 1, after + 1),
             },
         );
+        text.0.push('\n');
+        text.0.push_str(&scan.summary());
     }
 }
 
@@ -772,6 +779,7 @@ pub fn close(mut commands: Commands) {
     commands.remove_resource::<Symbols>();
     commands.remove_resource::<PageView>();
     commands.remove_resource::<Poke>();
+    commands.remove_resource::<Scan>();
     commands.remove_resource::<Captures>();
     commands.remove_resource::<Traced>();
     commands.remove_resource::<Lod>();

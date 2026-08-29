@@ -484,3 +484,82 @@ fn a_poke_into_nothing_fails_rather_than_pretending() {
     assert!(fx.target.write_mem(0x10, &[1, 2, 3, 4]).is_err());
     assert_eq!(fx.target.write_mem(fx.mark("window").0, &[]).ok(), Some(0));
 }
+
+/// §13: for a binary with no symbols, the pointer topology is the clearest available statement of
+/// what the program's data looks like. The fixture writes pointers with known destinations, so the
+/// scan has an exact answer rather than a plausible one.
+#[test]
+fn the_pointer_scan_finds_the_edges_the_fixture_wrote() {
+    use traveler_proc::{MemoryReader, ScanLimits, pointers};
+
+    let mut fx = Fixture::start(0);
+    let space = fx.target.capture().expect("capture");
+    let reader = MemoryReader::new(fx.target.pid());
+    let found = pointers::scan(&reader, &space, &ScanLimits::default());
+
+    let window = mapping_covering(&space, fx.mark("window").0);
+    let code = mapping_covering(&space, fx.mark("code").0);
+
+    let to_code = found
+        .out_of(window)
+        .find(|e| e.to == code)
+        .expect("no edge from the window to the code mapping");
+    assert_eq!(to_code.count, 3, "three pointers were written into code");
+
+    let to_self = found
+        .out_of(window)
+        .find(|e| e.to == window)
+        .expect("no edge from the window back to itself");
+    assert!(to_self.count >= 1);
+
+    // Heaviest first, and the scan reports its own precision rather than assuming it.
+    assert!(found.edges.windows(2).all(|w| w[0].count >= w[1].count));
+    assert!(found.words > 0);
+    assert!(!found.truncated);
+}
+
+/// Reading an absent page would fault it in and change the working set of the process being
+/// measured, so only resident pages are read.
+#[test]
+fn the_pointer_scan_leaves_the_working_set_alone() {
+    use traveler_proc::{MemoryReader, ScanLimits, pointers};
+
+    let mut fx = Fixture::start(0);
+    let before = fx.target.capture().expect("capture");
+    let resident = before.resident_bytes(before.frame().root());
+
+    let reader = MemoryReader::new(fx.target.pid());
+    pointers::scan(&reader, &before, &ScanLimits::default());
+
+    let after = fx.target.capture().expect("capture");
+    let grown = after
+        .resident_bytes(after.frame().root())
+        .saturating_sub(resident);
+    assert!(
+        grown < 256 * 4096,
+        "the scan faulted in {grown} bytes of the target"
+    );
+}
+
+/// The budget has to bound the scan, or a target with a large resident set is unbounded work.
+#[test]
+fn the_pointer_scan_stops_when_its_budget_runs_out() {
+    use traveler_proc::{MemoryReader, ScanLimits, pointers};
+
+    let mut fx = Fixture::start(0);
+    let space = fx.target.capture().expect("capture");
+    let reader = MemoryReader::new(fx.target.pid());
+    let found = pointers::scan(
+        &reader,
+        &space,
+        &ScanLimits {
+            budget_bytes: 4096,
+            chunk_bytes: 4096,
+        },
+    );
+    assert!(
+        found.truncated,
+        "a 4 KiB budget should not cover the target"
+    );
+    assert!(found.bytes_read <= 8192);
+}
