@@ -494,11 +494,13 @@ pub fn setup_hud(
         ],
     };
     let row_h = 19.0;
+    // Clears the five-line control panel underneath it, which is taller than the city's three.
+    let base = 112.0;
     commands.spawn((
         Node {
             position_type: PositionType::Absolute,
             left: Val::Px(6.0),
-            bottom: Val::Px(60.0),
+            bottom: Val::Px(base),
             width: Val::Px(380.0),
             height: Val::Px(rows.len() as f32 * row_h + 8.0),
             ..default()
@@ -507,7 +509,7 @@ pub fn setup_hud(
         DespawnOnExit(Mode::Process),
     ));
     for (i, (slot, label)) in rows.iter().enumerate() {
-        let y = 66.0 + (rows.len() - 1 - i) as f32 * row_h;
+        let y = base + 6.0 + (rows.len() - 1 - i) as f32 * row_h;
         commands.spawn((
             Node {
                 position_type: PositionType::Absolute,
