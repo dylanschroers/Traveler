@@ -5,6 +5,7 @@
 //! share of time the path was on the stack. Drawing is tiled by zoom level, so cost follows what
 //! is on screen rather than how long the recording is.
 
+mod explain;
 mod inspect;
 mod scene;
 mod tiles;
@@ -33,7 +34,7 @@ const USAGE: &str = "usage: traveler-timeline [options] --record PROGRAM [ARGS..
   --record runs PROGRAM under samply, saves the recording, and opens it. It takes the rest of the
   line, so options come before it.
 
-options: [--budget MAX_SPANS] [--px N] [--bench] [--shot FILE] [--vsync] [--no-bloom] [--offscreen] [--near] [--pick X Y]";
+options: [--budget MAX_SPANS] [--px N] [--bench] [--shot FILE] [--vsync] [--no-bloom] [--offscreen] [--near] [--pick X Y] [--explain]";
 
 enum Source {
     Synth { threads: usize, seconds: f64 },
@@ -55,10 +56,11 @@ struct Args {
     inspect: bool,
     msaa: u32,
     scale1: bool,
+    explain: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut a = Args { source: Source::Synth { threads: 16, seconds: 60.0 }, budget: 150_000, px: 1.5, bench: false, shot: None, vsync: false, bloom: true, offscreen: false, near: false, pick: None, inspect: true, msaa: 4, scale1: false };
+    let mut a = Args { source: Source::Synth { threads: 16, seconds: 60.0 }, budget: 150_000, px: 1.5, bench: false, shot: None, vsync: false, bloom: true, offscreen: false, near: false, pick: None, inspect: true, msaa: 4, scale1: false, explain: false };
     let mut it = std::env::args().skip(1);
     let num = |v: Option<String>, what: &str| -> Result<f64, String> {
         v.ok_or(format!("{what} needs a value"))?.replace('_', "").parse().map_err(|_| format!("{what} needs a number"))
@@ -88,6 +90,7 @@ fn parse_args() -> Result<Args, String> {
             "--no-inspect" => a.inspect = false,
             "--msaa" => a.msaa = num(it.next(), "--msaa")? as u32,
             "--scale1" => a.scale1 = true,
+            "--explain" => a.explain = true,
             "--pick" => {
                 let x = num(it.next(), "--pick")? as f32;
                 a.pick = Some(Vec2::new(x, num(it.next(), "--pick")? as f32));
@@ -165,6 +168,7 @@ fn main() {
     .insert_resource(MsaaSetting(args.msaa))
     .insert_resource(Near(args.near))
     .insert_resource(inspect::Inspect::new(args.pick))
+    .insert_resource(explain::Explain::new(args.explain))
     .insert_resource(Offscreen(args.offscreen.then(Handle::default)))
     .add_systems(Startup, (setup, setup_hud).chain())
     .add_systems(PostStartup, inspect::target_ui)
@@ -181,7 +185,7 @@ fn main() {
     if args.inspect {
         app.add_systems(Startup, inspect::setup.after(setup_hud)).add_systems(
             Update,
-            (inspect::pick, inspect::highlight, inspect::panels, inspect::thread_labels).chain().after(tiles::update_tiles).before(cursor_input),
+            (inspect::pick, inspect::highlight, inspect::panels, inspect::thread_labels, explain::update, explain::panel).chain().after(tiles::update_tiles).before(cursor_input),
         );
     }
     if args.bench {
@@ -396,7 +400,7 @@ fn update_hud(
             "{}   {} threads   {:.1} s   {} samples   {} call paths\n\
              {:.0} fps   {} spans drawn, budget {} of max {} (follows frame time)   {} tiles shown, {} cached, {} building   detail {:.1} px\n\
              WASD fly   space/ctrl up-down   shift run   right-drag look   hover or click a line, strand or the ring to inspect   drag the ring to scrub\n\
-             , . move the moment   C moment here   esc clear selection",
+             , . move the moment   C moment here   X explain selected function   esc clear selection",
             tr.name,
             tr.threads.len(),
             tr.duration,
@@ -425,7 +429,17 @@ struct Shot {
     taken: bool,
 }
 
-fn take_shot(mut commands: Commands, time: Res<Time<Real>>, mut shot: ResMut<Shot>, fps: Res<Fps>, offscreen: Res<Offscreen>) {
+fn take_shot(
+    mut commands: Commands,
+    time: Res<Time<Real>>,
+    mut shot: ResMut<Shot>,
+    fps: Res<Fps>,
+    offscreen: Res<Offscreen>,
+    explain: Res<explain::Explain>,
+) {
+    if explain.busy() {
+        return;
+    }
     shot.elapsed += time.delta_secs();
     if !shot.taken && shot.elapsed > 4.0 {
         shot.taken = true;

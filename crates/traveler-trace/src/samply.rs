@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{ROOT, Trace, TraceBuilder};
+use crate::{Origin, ROOT, Trace, TraceBuilder};
 
 #[derive(Deserialize)]
 struct Profile {
@@ -29,6 +29,7 @@ struct Meta {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Lib {
+    path: Option<String>,
     debug_name: String,
     code_id: Option<String>,
 }
@@ -107,13 +108,13 @@ struct LibSyms {
 }
 
 impl LibSyms {
-    fn lookup(&self, addr: u64) -> Option<usize> {
+    fn lookup(&self, addr: u64) -> Option<SymEntry> {
         if let Some(e) = self.known.get(&addr) {
-            return Some(e.symbol);
+            return Some(*e);
         }
         let i = self.sorted.partition_point(|e| e.rva <= addr);
         let e = self.sorted.get(i.checked_sub(1)?)?;
-        (addr < e.rva + e.size.max(1)).then_some(e.symbol)
+        (addr < e.rva + e.size.max(1)).then_some(*e)
     }
 }
 
@@ -154,10 +155,10 @@ pub fn load(path: &Path) -> Result<Trace, String> {
             }
         }
     }
-    let sym_name = |lib: usize, addr: i64| -> Option<&str> {
+    let symbol = |lib: usize, addr: i64| -> Option<(&str, u64)> {
         let syms = syms.as_ref()?;
-        let s = lib_syms.get(lib)?.as_ref()?.lookup(u64::try_from(addr).ok()?)?;
-        syms.string_table.get(s).map(String::as_str)
+        let e = lib_syms.get(lib)?.as_ref()?.lookup(u64::try_from(addr).ok()?)?;
+        syms.string_table.get(e.symbol).map(|name| (name.as_str(), e.rva))
     };
 
     let mut b = TraceBuilder::new();
@@ -192,9 +193,15 @@ pub fn load(path: &Path) -> Result<Trace, String> {
                         None => "unknown",
                     };
                     let raw = th.string_array[th.func_table.name[fi]].as_str();
-                    let name = lib.and_then(|l| sym_name(l, th.frame_table.address[frame])).unwrap_or(raw);
+                    let found = lib.and_then(|l| symbol(l, th.frame_table.address[frame]).map(|s| (l, s)));
+                    let name = found.map_or(raw, |(_, (name, _))| name);
+                    let origin = found.and_then(|(l, (_, rva))| {
+                        let info = profile.libs.get(l)?;
+                        let image = b.image(info.path.as_deref()?, info.code_id.as_deref());
+                        Some(Origin { image, rva })
+                    });
                     let m = b.module(module_name);
-                    let f = b.func(m, name);
+                    let f = b.func_at(m, name, origin);
                     frame_func[frame] = Some(f);
                     f
                 }
@@ -232,7 +239,7 @@ mod tests {
 
     const PROFILE: &str = r#"{
       "meta": { "interval": 1.0, "product": "demo" },
-      "libs": [ { "debugName": "demo", "codeId": "ABC" } ],
+      "libs": [ { "path": "/bin/demo", "debugName": "demo", "codeId": "ABC" } ],
       "threads": [
         { "name": "worker", "pid": 7, "isMainThread": false, "processName": "demo", "registerTime": 5.0,
           "samples": { "stack": [0], "time": [20.0], "weight": [1] },
@@ -286,6 +293,16 @@ mod tests {
         let stack = trace.stack_at(0, 0.004).unwrap();
         assert_eq!(trace.name_of(*stack.last().unwrap()), "0x3e7");
         assert_eq!(trace.modules[trace.module_of(*stack.last().unwrap()) as usize], "unknown");
+    }
+
+    #[test]
+    fn a_function_remembers_its_binary_and_entry_not_the_sampled_address() {
+        let trace = load(&write("origin")).unwrap();
+        let f = trace.funcs.iter().find(|f| f.name == "parse").unwrap();
+        let origin = f.origin.unwrap();
+        assert_eq!(origin.rva, 32);
+        assert_eq!(trace.images[origin.image as usize].path, "/bin/demo");
+        assert_eq!(trace.images[origin.image as usize].code_id.as_deref(), Some("ABC"));
     }
 
     #[test]

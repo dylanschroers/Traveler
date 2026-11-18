@@ -65,7 +65,7 @@ fn font(size: f32) -> TextFont {
     TextFont { font_size: FontSize::Px(size), ..default() }
 }
 
-fn span(scene: &SceneRef, p: Pick) -> Span {
+pub fn span(scene: &SceneRef, p: Pick) -> Span {
     scene.levels.levels[p.level as usize].spans[p.span as usize]
 }
 
@@ -138,20 +138,29 @@ pub fn setup(mut commands: Commands, scene: Res<SceneRef>) {
         .id();
     commands.entity(column).add_children(&[legend, details]);
 
-    commands.spawn((
-        Node {
+    let left = commands
+        .spawn(Node {
             position_type: PositionType::Absolute,
             left: Val::Px(12.0),
             top: Val::Px(96.0),
             width: Val::Px(560.0),
-            padding: UiRect::all(Val::Px(10.0)),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(8.0),
             ..default()
-        },
-        BackgroundColor(PANEL),
-        Text::new(story_text(&scene)),
-        font(12.0),
-        TextColor(INK),
-    ));
+        })
+        .id();
+    let story = commands.spawn((panel(), BackgroundColor(PANEL), Text::new(story_text(&scene)), font(12.0), TextColor(INK))).id();
+    let code = commands
+        .spawn((
+            Node { display: Display::None, ..panel() },
+            BackgroundColor(PANEL),
+            Text::new(""),
+            font(12.0),
+            TextColor(INK),
+            crate::explain::CodePanel,
+        ))
+        .id();
+    commands.entity(left).add_children(&[story, code]);
 
     commands.spawn((
         Node { position_type: PositionType::Absolute, padding: UiRect::all(Val::Px(6.0)), ..default() },
@@ -278,7 +287,9 @@ pub fn pick(
     {
         inspect.pinned = inspect.hover;
     }
-    if inspect.fake.is_some() && inspect.pinned.is_none() {
+    // Function lines load after the strands and the ring, so a pretend click prefers them.
+    let line_now = matches!(inspect.hover, Some(Target::Span(_))) && !matches!(inspect.pinned, Some(Target::Span(_)));
+    if inspect.fake.is_some() && (inspect.pinned.is_none() || line_now) {
         inspect.pinned = inspect.hover;
     }
 }
@@ -597,7 +608,7 @@ pub fn panels(
     for &f in &path[path.len().saturating_sub(5)..] {
         s.push_str(&format!("  {}{}\n", if f == sp.node { "> " } else { "" }, short(&clean_name(tr.name_of(f)), 48)));
     }
-    s.push_str("\n(esc or click empty space to clear)");
+    s.push_str("\nPress X to see what this code is.  (esc clears)");
     set_text(&mut text, s);
 }
 

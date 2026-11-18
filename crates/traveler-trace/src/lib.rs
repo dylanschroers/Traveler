@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use rayon::prelude::*;
 
 pub mod describe;
+pub mod rea;
 pub mod samply;
 pub mod story;
 pub mod synth;
@@ -17,6 +18,21 @@ pub mod synth;
 pub struct Func {
     pub name: String,
     pub module: u16,
+    /// Where the function starts in its binary, when the recording says.
+    pub origin: Option<Origin>,
+}
+
+/// A function's entry, relative to the start of [`Image`] number `image`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Origin {
+    pub image: u16,
+    pub rva: u64,
+}
+
+/// A binary as it was when recorded.
+pub struct Image {
+    pub path: String,
+    pub code_id: Option<String>,
 }
 
 pub struct Thread {
@@ -34,6 +50,7 @@ pub struct Thread {
 pub struct Trace {
     pub name: String,
     pub modules: Vec<String>,
+    pub images: Vec<Image>,
     pub funcs: Vec<Func>,
     pub parent: Vec<u32>,
     pub func: Vec<u32>,
@@ -90,8 +107,9 @@ impl Trace {
 pub struct TraceBuilder {
     modules: Vec<String>,
     module_ids: HashMap<String, u16>,
+    images: Vec<Image>,
     funcs: Vec<Func>,
-    func_ids: HashMap<(u16, String), u32>,
+    func_ids: HashMap<(u16, String, Option<Origin>), u32>,
     parent: Vec<u32>,
     func: Vec<u32>,
     depth: Vec<u16>,
@@ -114,13 +132,28 @@ impl TraceBuilder {
         id
     }
 
+    pub fn image(&mut self, path: &str, code_id: Option<&str>) -> u16 {
+        if let Some(i) = self.images.iter().position(|m| m.path == path && m.code_id.as_deref() == code_id) {
+            return i as u16;
+        }
+        self.images.push(Image { path: path.to_string(), code_id: code_id.map(str::to_string) });
+        (self.images.len() - 1) as u16
+    }
+
     pub fn func(&mut self, module: u16, name: &str) -> u32 {
-        if let Some(&id) = self.func_ids.get(&(module, name.to_string())) {
+        self.func_at(module, name, None)
+    }
+
+    /// Functions are told apart by where they start as well as by name: generic wrappers such as
+    /// `call_mut` share one symbol name across many different bodies.
+    pub fn func_at(&mut self, module: u16, name: &str, origin: Option<Origin>) -> u32 {
+        let key = (module, name.to_string(), origin);
+        if let Some(&id) = self.func_ids.get(&key) {
             return id;
         }
         let id = self.funcs.len() as u32;
-        self.funcs.push(Func { name: name.to_string(), module });
-        self.func_ids.insert((module, name.to_string()), id);
+        self.funcs.push(Func { name: name.to_string(), module, origin });
+        self.func_ids.insert(key, id);
         id
     }
 
@@ -176,6 +209,7 @@ impl TraceBuilder {
         let mut trace = Trace {
             name: String::new(),
             modules: self.modules,
+            images: self.images,
             funcs: self.funcs,
             parent: self.parent,
             func: self.func,
