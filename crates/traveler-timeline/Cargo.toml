@@ -1,0 +1,8 @@
+[package]
+name = "traveler-timeline"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+traveler-trace = { path = "../traveler-trace" }
+bevy = { version = "0.19", features = ["free_camera"] }

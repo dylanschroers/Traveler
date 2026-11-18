@@ -5240,6 +5240,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "traveler-timeline"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "traveler-trace",
+]
+
+[[package]]
+name = "traveler-trace"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "rayon",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "tree_magic_mini"
 version = "3.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

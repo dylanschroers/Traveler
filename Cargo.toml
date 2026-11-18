@@ -5,9 +5,11 @@ members = [
     "crates/traveler-scan",
     "crates/traveler-proc",
     "crates/traveler-sym",
+    "crates/traveler-trace",
     "crates/traveler-layout",
     "crates/traveler-edges",
     "crates/traveler-app",
+    "crates/traveler-timeline",
     "spike",
 ]
 
